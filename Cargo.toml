@@ -1,0 +1,25 @@
+[package]
+name = "stewsh"
+version = "0.1.0"
+edition = "2021"
+description = "StewardShell: a local-first terminal session secretary and priority queue"
+license = "MIT"
+repository = "https://github.com/mscottnelson/stewsh"
+readme = "README.md"
+keywords = ["terminal", "triage", "productivity", "shell", "sqlite"]
+categories = ["command-line-utilities"]
+include = ["src/**", "shell/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+dirs = "5.0"
+tokio = { version = "1.35", features = ["full"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
