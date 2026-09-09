@@ -9,11 +9,15 @@ network calls, AI service, or external database required.
 Requires latest stable Rust and a C compiler to build bundled SQLite:
 
 ```sh
-cargo install --git https://github.com/mscottnelson/stewsh --locked
+cargo install stewsh --locked
 ```
 
-The crates.io package is prepared but **not yet published**. Once published,
-`cargo install stewsh --locked` will be available.
+Published on [crates.io](https://crates.io/crates/stewsh). To install the latest
+development version instead:
+
+```sh
+cargo install --git https://github.com/mscottnelson/stewsh --locked
+```
 
 ## Use
 
@@ -96,9 +100,9 @@ cargo package --locked
 
 ## Publishing
 
-The public repository is the project home. A crates.io name is allocated only
-by a successful publish, not by repository creation. To publish this functional
-initial version, authenticate locally with `cargo login`, then:
+Version `0.1.0` is published on crates.io. For a subsequent release, update the
+package version and lockfile, run the checks above, and commit the changes.
+Authenticate locally with `cargo login`, then:
 
 ```sh
 cargo publish --locked --dry-run
