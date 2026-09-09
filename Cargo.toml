@@ -8,7 +8,7 @@ repository = "https://github.com/mscottnelson/stewsh"
 readme = "README.md"
 keywords = ["terminal", "triage", "productivity", "shell", "sqlite"]
 categories = ["command-line-utilities"]
-include = ["src/**", "shell/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
+include = ["src/**", "tests/**", "shell/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }

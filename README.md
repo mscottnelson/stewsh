@@ -69,6 +69,18 @@ The target is <15ms for local triage on typical session counts; cold startup,
 storage, lock contention, and large databases can exceed it. Ranking currently
 reads and sorts all sessions. Benchmark release builds on your own hardware.
 
+On an Apple Silicon Mac with Rust 1.98.1 (2026-09-09), 100 measured warm
+process launches after 10 warmups against 1,001 sessions produced:
+
+| Command | Median | p95 | Maximum |
+| --- | ---: | ---: | ---: |
+| `triage` | 4.90ms | 5.88ms | 7.24ms |
+| `next` | 4.77ms | 5.57ms | 6.02ms |
+| `track` | 4.93ms | 5.91ms | 9.31ms |
+
+These measurements include process startup with output redirected, and are
+observations on one machine, not a universal latency guarantee.
+
 The binary needs no separately installed SQLite or Rust runtime. Linux musl
 builds are fully static, checked by CI. macOS uses system libraries and cannot
 meet the same fully-static distribution model. The requested Cargo dependencies
