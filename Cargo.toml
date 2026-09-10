@@ -19,7 +19,7 @@ serde_json = "1.0"
 shlex = "2.0"
 sha2 = "0.10"
 dirs = "5.0"
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.35", features = ["rt-multi-thread", "net"] }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "query"] }
 
 [profile.release]
@@ -28,5 +28,3 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
-[dev-dependencies]
-chrono = "0.4"

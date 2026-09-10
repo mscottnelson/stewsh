@@ -43,11 +43,17 @@ fn raise(c: &Context) -> Result<Value> {
             .ok_or("this tab has no recorded URL; run tabs to refresh")?;
         return browser::focus(url);
     }
-    Err(format!(
-        "{} is an agent session with no window; its transcript is {}",
-        c.name,
-        c.external_ref.as_deref().unwrap_or("not recorded")
-    )
+    Err(match c.kind.as_str() {
+        "agent" => format!(
+            "{} is an agent session with no window; its transcript is {}",
+            c.name,
+            c.external_ref.as_deref().unwrap_or("not recorded")
+        ),
+        _ => format!(
+            "{} has no iTerm pane to focus; run sync, or return to it yourself",
+            if c.name.is_empty() { &c.id } else { &c.name }
+        ),
+    }
     .into())
 }
 
@@ -126,6 +132,21 @@ pub fn context_action(
 ) -> Result<Value> {
     let tx = conn.transaction()?;
     let c = store::find(&tx, query, t)?;
+    let out = apply_context(&tx, &c, action, value, minutes, t)?;
+    tx.commit()?;
+    Ok(out)
+}
+
+/// The action itself, on a caller-owned transaction, so a stream-wide fan-out
+/// is one atomic unit instead of one transaction per member.
+fn apply_context(
+    tx: &Connection,
+    c: &crate::model::Context,
+    action: &str,
+    value: Option<&str>,
+    minutes: Option<u32>,
+    t: i64,
+) -> Result<Value> {
     let (sql, data): (&str, Value) = match action {
         "pin" => ("UPDATE sessions SET pinned=1 WHERE id=?1", json!({})),
         "unpin" => ("UPDATE sessions SET pinned=0 WHERE id=?1", json!({})),
@@ -149,8 +170,7 @@ pub fn context_action(
                 "UPDATE sessions SET snoozed_until=?2 WHERE id=?1",
                 params![c.id, until],
             )?;
-            store::event(&tx, &c.id, t, "snoozed", json!({"until": until}), None)?;
-            tx.commit()?;
+            store::event(tx, &c.id, t, "snoozed", json!({"until": until}), None)?;
             return Ok(json!({"id": c.id, "action": "snoozed", "until": until}));
         }
         "capture" => {
@@ -160,8 +180,7 @@ pub fn context_action(
                 "UPDATE sessions SET note=?2,revision=revision+1,last_active_interaction=?3 WHERE id=?1",
                 params![c.id, note, t],
             )?;
-            store::event(&tx, &c.id, t, "captured", json!({"note": note}), None)?;
-            tx.commit()?;
+            store::event(tx, &c.id, t, "captured", json!({"note": note}), None)?;
             return Ok(json!({"id": c.id, "action": "captured"}));
         }
         "clear" => {
@@ -169,8 +188,7 @@ pub fn context_action(
                 "UPDATE sessions SET note=NULL,revision=revision+1 WHERE id=?1",
                 [&c.id],
             )?;
-            store::event(&tx, &c.id, t, "captured", json!({"note": null}), None)?;
-            tx.commit()?;
+            store::event(tx, &c.id, t, "captured", json!({"note": null}), None)?;
             return Ok(json!({"id": c.id, "action": "cleared"}));
         }
         other => return Err(format!("unknown action: {other}").into()),
@@ -180,8 +198,7 @@ pub fn context_action(
     } else {
         tx.execute(sql, [&c.id])?;
     }
-    store::event(&tx, &c.id, t, action, data, None)?;
-    tx.commit()?;
+    store::event(tx, &c.id, t, action, data, None)?;
     Ok(json!({"id": c.id, "action": action}))
 }
 
@@ -209,12 +226,16 @@ pub fn stream_action(
             return Ok(json!({"id": s.id, "action": "renamed", "name": name}));
         }
         "snooze" | "resolve" | "review" => {
-            // Stream-level verbs fan out to the members they actually describe.
+            // One transaction for the whole fan-out: a failure part way through
+            // must not leave some members changed and the caller told it failed.
+            // The members are already loaded, so no per-member rescan either.
+            let tx = conn.transaction()?;
             let mut touched = Vec::new();
-            for m in s.members.iter().filter(|m| m.queued(t)) {
-                context_action(conn, &m.id, action, None, None, t)?;
+            for m in s.members.iter().filter(|m| m.kind != "tab" && m.queued(t)) {
+                apply_context(&tx, m, action, None, None, t)?;
                 touched.push(m.id.clone());
             }
+            tx.commit()?;
             return Ok(json!({"id": s.id, "action": action, "contexts": touched}));
         }
         other => return Err(format!("unknown stream action: {other}").into()),
@@ -237,8 +258,7 @@ pub fn group(
         Ok(s) => s,
         Err(_) => {
             validate(target, "stream name")?;
-            let mut fresh = stream::blank(&slug(target), target);
-            fresh.key = slug(target);
+            let fresh = stream::blank(&slug(target), target);
             stream::ensure(conn, &fresh, t)?;
             fresh
         }

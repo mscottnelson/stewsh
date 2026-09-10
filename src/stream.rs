@@ -14,16 +14,17 @@ pub const UNASSIGNED: &str = "unassigned";
 
 pub fn ensure(conn: &Connection, s: &Stream, now: i64) -> Result<()> {
     conn.execute(
-        "INSERT INTO streams(id,name,key,repo,branch,worktree,created_at,dirty,ahead,pr)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
-         ON CONFLICT(id) DO UPDATE SET repo=excluded.repo,branch=excluded.branch,
-           worktree=excluded.worktree,dirty=excluded.dirty,ahead=excluded.ahead,
-           pr=COALESCE(excluded.pr,streams.pr),key=excluded.key",
+        "INSERT INTO streams(id,name,key,repo,host,branch,worktree,created_at,dirty,ahead,pr)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+         ON CONFLICT(id) DO UPDATE SET repo=excluded.repo,host=excluded.host,
+           branch=excluded.branch,worktree=excluded.worktree,dirty=excluded.dirty,
+           ahead=excluded.ahead,pr=COALESCE(excluded.pr,streams.pr),key=excluded.key",
         params![
             s.id,
             s.name,
             s.key,
             s.repo,
+            s.host,
             s.branch,
             s.worktree,
             now,
@@ -41,6 +42,7 @@ pub fn blank(id: &str, name: &str) -> Stream {
         name: name.into(),
         key: id.into(),
         repo: String::new(),
+        host: String::new(),
         branch: String::new(),
         worktree: String::new(),
         pinned: false,
@@ -114,6 +116,7 @@ pub fn regroup(conn: &mut Connection, git: &mut Git, now: i64) -> Result<usize> 
         let mut s = blank(&slug(&key), &name);
         s.key = key;
         s.repo = info.repo.clone();
+        s.host = info.host.clone();
         s.branch = info.branch.clone();
         s.worktree = info.worktree.clone();
         s.dirty = info.dirty;
@@ -133,6 +136,7 @@ pub fn regroup(conn: &mut Connection, git: &mut Git, now: i64) -> Result<usize> 
         s.key = key;
         if let Some(i) = &info {
             s.repo = i.repo.clone();
+            s.host = i.host.clone();
             s.branch = i.branch.clone();
             s.worktree = i.worktree.clone();
             s.dirty = i.dirty;
@@ -176,7 +180,7 @@ fn load(conn: &Connection, now: i64) -> Result<Vec<Stream>> {
     }
     let mut q = conn.prepare(
         "SELECT id,name,key,repo,branch,worktree,pinned,archived,created_at,dirty,ahead,pr,
-         ordinal,why,next_action,confidence,ranked_at FROM streams",
+         ordinal,why,next_action,confidence,ranked_at,host FROM streams",
     )?;
     let mut streams = q
         .query_map([], |r| {
@@ -199,6 +203,7 @@ fn load(conn: &Connection, now: i64) -> Result<Vec<Stream>> {
                 next: r.get(14)?,
                 confidence: r.get(15)?,
                 ranked_at: r.get(16)?,
+                host: r.get(17)?,
                 members: vec![],
                 heat: 0.0,
                 heat_points: 0,
@@ -287,21 +292,23 @@ pub fn find(streams: &[Stream], query: &str) -> Result<Stream> {
         return Err("stream must not be empty".into());
     }
     if let Ok(n) = q.parse::<i64>() {
-        if let Some(s) = streams.iter().find(|s| s.ordinal == Some(n)) {
-            return Ok(s.clone());
-        }
-        if let Some(s) = streams.get((n - 1).max(0) as usize).filter(|_| n >= 1) {
-            return Ok(s.clone());
-        }
+        return streams
+            .get((n - 1) as usize)
+            .filter(|_| n >= 1)
+            .cloned()
+            .ok_or_else(|| format!("there is no stream {n} in this view").into());
     }
     if let Some(s) = streams.iter().find(|s| s.id == q) {
         return Ok(s.clone());
     }
     let lower = q.to_lowercase();
+    if let Some(s) = streams.iter().find(|s| s.id.to_lowercase() == lower) {
+        return Ok(s.clone());
+    }
     let matches: Vec<_> = streams
         .iter()
         .filter(|s| {
-            s.id.starts_with(&lower)
+            s.id.to_lowercase().starts_with(&lower)
                 || s.key.to_lowercase().contains(&lower)
                 || s.name.to_lowercase().contains(&lower)
         })

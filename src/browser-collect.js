@@ -1,23 +1,28 @@
-// Browser tabs use the same Automation permission class as iTerm. Generic app
-// windows would need Accessibility, which is a separate and broader grant.
+// Reports per browser, so an absent or unauthorised browser is distinguishable
+// from one with no tabs. Treating those alike let a partial snapshot look
+// authoritative and destroy rows for tabs it simply could not see.
 function collect(name) {
-    var out = [];
+    var report = { name: name, ok: false, reason: '', tabs: [] };
+    var app;
+    try { app = Application(name); } catch (e) { report.reason = 'not installed'; return report; }
+    try { if (!app.running()) { report.reason = 'not running'; return report; } }
+    catch (e) { report.reason = 'not scriptable: ' + e; return report; }
     try {
-        var app = Application(name);
-        if (!app.running()) return out;
         app.windows().forEach(function (w, wi) {
-            var tabs = w.tabs();
-            tabs.forEach(function (t, ti) {
+            w.tabs().forEach(function (t, ti) {
                 var url = '', title = '';
                 try { url = String(t.url() || ''); } catch (e) { }
                 try { title = String((name === 'Safari' ? t.name() : t.title()) || ''); } catch (e) { }
                 if (url && url.indexOf('http') === 0) {
-                    out.push({ browser: name, url: url, title: title,
-                               location: 'Window ' + (wi + 1) + ' / Tab ' + (ti + 1) });
+                    report.tabs.push({ browser: name, url: url, title: title,
+                                       location: 'Window ' + (wi + 1) + ' / Tab ' + (ti + 1) });
                 }
             });
         });
-    } catch (e) { }
-    return out;
+        report.ok = true;
+    } catch (e) {
+        report.reason = 'could not read windows: ' + e;
+    }
+    return report;
 }
-JSON.stringify(collect('Google Chrome').concat(collect('Safari')));
+JSON.stringify({ browsers: [collect('Google Chrome'), collect('Safari')] });

@@ -112,6 +112,7 @@ pub struct Stream {
     pub name: String,
     pub key: String,
     pub repo: String,
+    pub host: String,
     pub branch: String,
     pub worktree: String,
     pub pinned: bool,
@@ -144,21 +145,21 @@ impl Stream {
                 .cmp(&a.score)
                 .then_with(|| b.last_active.cmp(&a.last_active))
         });
-        let queued: Vec<&Context> = self
+        let live: Vec<&Context> = self
             .members
             .iter()
             .filter(|m| m.kind != "tab" && m.queued(now))
             .collect();
-        let live: &[&Context] = if queued.is_empty() {
-            &[]
-        } else {
-            queued.as_slice()
-        };
-        // Hottest member leads; the rest contribute, but breadth alone must not
-        // pin a sprawling directory grouping to the ceiling.
+        // Hottest member leads and each next one counts half as much, so the
+        // total converges to twice the hottest. Breadth can never saturate the
+        // clamp on its own; only genuinely hot work gets there.
         let mut heats: Vec<f64> = live.iter().map(|m| m.heat).collect();
         heats.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        self.heat = heats.first().copied().unwrap_or(0.0) + 0.3 * heats.iter().skip(1).sum::<f64>();
+        self.heat = heats
+            .iter()
+            .enumerate()
+            .map(|(i, h)| h * 0.5f64.powi(i as i32))
+            .sum();
         self.debt = live.iter().map(|m| m.score).max().unwrap_or(0);
         self.last_active = self
             .members
@@ -229,12 +230,15 @@ impl Stream {
     }
 
     pub fn queued(&self, now: i64) -> bool {
+        // An uncommitted or unpushed worktree is unfinished work whether or not
+        // any pane is still open on it, so this must not depend on membership.
         !self.archived
-            && (self
-                .members
-                .iter()
-                .any(|m| m.kind != "tab" && m.queued(now))
-                || (self.members.is_empty() && (self.dirty || self.ahead > 0)))
+            && (self.dirty
+                || self.ahead > 0
+                || self
+                    .members
+                    .iter()
+                    .any(|m| m.kind != "tab" && m.queued(now)))
     }
 }
 
@@ -268,12 +272,15 @@ pub fn clean(text: &str, width: usize) -> String {
         .collect()
 }
 
+/// Case is preserved: `repo#Feature-X` and `repo#feature-x` are different
+/// branches and must not collapse into one stream. Lookup is case-insensitive,
+/// so nothing downstream needs the lowercasing this used to do.
 pub fn slug(text: &str) -> String {
     let s: String = text
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '#' | '-' | '_' | '.' | '/') {
-                c.to_ascii_lowercase()
+                c
             } else {
                 '-'
             }

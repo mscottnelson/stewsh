@@ -53,7 +53,9 @@ prefix with the ID it invented.
 
 ## Two clocks
 
-**Heat** is decayed activity with a 90-minute half-life. It sums weighted events
+**Heat** is decayed activity with a 90-minute half-life. Within a stream the
+hottest member leads and each next counts half as much, so the total converges
+to twice the hottest and breadth alone cannot saturate the clamp. It sums weighted events
 and adds a baseline decayed from the context's last activity, so it measures how
 recently work was live rather than how often the user ran `sync`. Deliberate
 user acts weigh most, agent transitions less, screen changes least. Discovering

@@ -13,6 +13,9 @@ pub struct RepoInfo {
     pub toplevel: String,
     pub common_dir: String,
     pub repo: String,
+    /// Host of the `origin` remote, so a tab can be matched against the place
+    /// this repository actually lives rather than any site that names it.
+    pub host: String,
     pub branch: String,
     /// Set only when this checkout is a linked worktree, not the main one.
     pub worktree: String,
@@ -77,7 +80,9 @@ impl Git {
             .filter(|b| b != "HEAD")
             .or_else(|| git(cwd, &["rev-parse", "--short", "HEAD"]).map(|s| format!("@{s}")))
             .unwrap_or_else(|| "unknown".into());
-        let repo = git(cwd, &["remote", "get-url", "origin"])
+        let remote = git(cwd, &["remote", "get-url", "origin"]);
+        let repo = remote
+            .as_deref()
             .map(|url| {
                 url.trim_end_matches('/')
                     .trim_end_matches(".git")
@@ -87,6 +92,7 @@ impl Git {
                     .to_string()
             })
             .unwrap_or_else(|| basename(&toplevel));
+        let host = remote.as_deref().map(remote_host).unwrap_or_default();
         Some(RepoInfo {
             dirty: git(cwd, &["status", "--porcelain", "--untracked-files=no"]).is_some(),
             ahead: git(cwd, &["rev-list", "--count", "@{u}..HEAD"])
@@ -100,6 +106,7 @@ impl Git {
             toplevel,
             common_dir,
             repo,
+            host,
             branch,
         })
     }
@@ -186,6 +193,21 @@ impl Git {
         out.dedup_by(|a, b| a.toplevel == b.toplevel);
         out
     }
+}
+
+/// `git@github.com:acme/x.git` and `https://github.com/acme/x` both give
+/// `github.com`.
+pub fn remote_host(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let after_user = after_scheme
+        .rsplit_once('@')
+        .map(|(_, r)| r)
+        .unwrap_or(after_scheme);
+    after_user
+        .split(['/', ':'])
+        .next()
+        .unwrap_or_default()
+        .to_lowercase()
 }
 
 pub fn basename(path: &str) -> String {

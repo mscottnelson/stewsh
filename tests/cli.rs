@@ -387,17 +387,17 @@ fn stream_pin_and_archive_change_the_queue() {
     let a = App::new();
     a.run(&["track", "one"]);
     a.run(&["group", "one", "--to", "Alpha"]);
-    a.run(&["stream", "pin", "alpha"]);
+    a.run(&["stream", "pin", "alpha"]); // lookup stays case-insensitive
     let streams = a.run(&["queue", "--all", "--limit", "200"])["streams"]
         .as_array()
         .unwrap()
         .clone();
-    let alpha = streams.iter().find(|s| s["id"] == "alpha").unwrap();
+    let alpha = streams.iter().find(|s| s["id"] == "Alpha").unwrap();
     assert_eq!(alpha["pinned"], true);
     assert!(alpha["score"].as_i64().unwrap() >= 100);
     a.run(&["stream", "archive", "alpha"]);
     let visible = a.run(&["queue"])["streams"].as_array().unwrap().clone();
-    assert!(visible.iter().all(|s| s["id"] != "alpha"));
+    assert!(visible.iter().all(|s| s["id"] != "Alpha"));
 }
 
 #[test]
@@ -757,14 +757,14 @@ fn regrouping_does_not_orphan_browser_tabs() {
         "INSERT INTO sessions(id,cwd,creation_time,last_active_interaction,kind,source,name,external_ref)
          VALUES('tab:abc','',1,1,'tab','browser','PR 12','https://github.com/acme/x/pull/12');
          INSERT INTO stream_members(stream_id,context_id,role,origin)
-         VALUES('alpha','tab:abc','tab','auto');",
+         VALUES('Alpha','tab:abc','tab','auto');",
     );
     a.run(&["track", "pane-two"]); // forces a regroup on the next assemble
     let streams = a.run(&["queue", "--all", "--limit", "200"])["streams"]
         .as_array()
         .unwrap()
         .clone();
-    let alpha = streams.iter().find(|s| s["id"] == "alpha").unwrap();
+    let alpha = streams.iter().find(|s| s["id"] == "Alpha").unwrap();
     let ids: Vec<&str> = alpha["members"]
         .as_array()
         .unwrap()
@@ -1027,4 +1027,163 @@ printf '{"ranking":[]}'
     );
     let v: Value = serde_json::from_slice(&queue.stdout).unwrap();
     assert_eq!(v["ok"], true);
+}
+
+#[test]
+fn repository_evidence_keeps_a_stream_visible_after_its_panes_are_resolved() {
+    let a = App::new();
+    a.run(&["track", "one"]);
+    // Stand in for a dirty worktree with no live pane left on it.
+    a.sql(
+        "INSERT INTO streams(id,name,key,repo,branch,worktree,created_at,dirty,ahead)
+         VALUES('r1#wip','r1 wip','r1#wip','r1','wip','/tmp/wt',1,1,2);
+         INSERT INTO stream_members(stream_id,context_id,role,origin)
+         VALUES('r1#wip','one','pane','manual');",
+    );
+    a.run(&["resolve", "one"]);
+    let debt = a.run(&["queue", "--mode", "debt", "--limit", "200"])["streams"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let wip = debt
+        .iter()
+        .find(|s| s["id"] == "r1#wip")
+        .expect("uncommitted work stays in the queue after its pane is resolved");
+    assert_eq!(wip["dirty"], true);
+    assert!(wip["debt"].as_i64().unwrap() >= 10);
+}
+
+#[test]
+fn branches_differing_only_in_case_stay_separate_streams() {
+    let a = App::new();
+    a.run(&["track", "one"]);
+    a.run(&["track", "two"]);
+    // Two real branches whose derived keys differ only in case. Lowercasing the
+    // slug merged them, and the upsert then let each overwrite the other's git
+    // facts on every regroup.
+    a.sql(
+        "INSERT INTO streams(id,name,key,repo,host,branch,worktree,created_at,dirty,ahead)
+         VALUES('r#Feature-X','r Feature-X','r#Feature-X','r','github.com','Feature-X','',1,1,0),
+               ('r#feature-x','r feature-x','r#feature-x','r','github.com','feature-x','',1,0,3);
+         INSERT INTO stream_members(stream_id,context_id,role,origin)
+         VALUES('r#Feature-X','one','pane','manual'),('r#feature-x','two','pane','manual');",
+    );
+    let streams = a.run(&["queue", "--all", "--limit", "200"])["streams"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let upper = streams.iter().find(|s| s["id"] == "r#Feature-X").unwrap();
+    let lower = streams.iter().find(|s| s["id"] == "r#feature-x").unwrap();
+    assert_eq!(upper["members"][0]["id"], "one");
+    assert_eq!(lower["members"][0]["id"], "two");
+    // Their git facts stay their own rather than overwriting each other.
+    assert_eq!(upper["dirty"], true);
+    assert_eq!(lower["ahead"], 3);
+    // A case-insensitive lookup still reaches one of them rather than failing.
+    assert!(a.run(&["stream", "pin", "r#Feature-X"])["action"] == "pin");
+}
+
+#[test]
+fn a_printed_row_number_is_the_one_focus_resolves() {
+    let a = App::new();
+    for id in ["alpha", "beta", "gamma"] {
+        a.run(&["track", id]);
+        a.run(&["group", id, "--to", id]);
+    }
+    // A stale ranking must not renumber a differently sorted view.
+    a.sql("UPDATE streams SET ordinal=3 WHERE id='alpha'; UPDATE streams SET ordinal=1 WHERE id='gamma';");
+    for mode in ["active", "debt", "ranked"] {
+        let streams = a.run(&["queue", "--mode", mode, "--limit", "200"])["streams"]
+            .as_array()
+            .unwrap()
+            .clone();
+        for (i, s) in streams.iter().enumerate() {
+            let out = a
+                .command()
+                .arg("--json")
+                .args(["focus", &(i + 1).to_string(), "--mode", mode, "--all"])
+                .output()
+                .unwrap();
+            let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+            // Focus itself needs a real pane; what matters is which stream it
+            // resolved the number to, which the error names either way.
+            let named = v["data"]["stream"].as_str().unwrap_or_default().to_string()
+                + v["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                named.contains(s["name"].as_str().unwrap()),
+                "row {} in {mode} resolved to something else: {named}",
+                i + 1
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_unreadable_browser_never_deletes_the_tabs_it_cannot_see() {
+    use std::os::unix::fs::PermissionsExt;
+    let a = App::new();
+    let mock = a.root.join("osascript");
+    fs::write(&mock, "#!/bin/sh\ncat \"$STEWSH_TEST_TABS\"\n").unwrap();
+    fs::set_permissions(&mock, fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = a.root.join("tabs.json");
+    let path = format!(
+        "{}:{}",
+        a.root.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let tabs = || {
+        a.command()
+            .args(["--json", "tabs"])
+            .env("PATH", &path)
+            .env("STEWSH_TEST_TABS", &fixture)
+            .output()
+            .unwrap()
+    };
+    // Chrome has the tab; Safari is not running.
+    fs::write(
+        &fixture,
+        r#"{"browsers":[{"name":"Google Chrome","ok":true,"reason":"","tabs":[
+           {"browser":"Google Chrome","url":"https://github.com/acme/thing/pull/1",
+            "title":"PR 1","location":"W1"}]},
+           {"name":"Safari","ok":false,"reason":"not running","tabs":[]}]}"#,
+    )
+    .unwrap();
+    assert!(tabs().status.success());
+    // A Safari tab the user had captured a note on, from an earlier run.
+    a.sql(
+        "INSERT INTO sessions(id,cwd,creation_time,last_active_interaction,kind,source,agent,name,note,availability)
+         VALUES('tab:safari1','',1,1,'tab','browser','Safari','Design doc','come back to this','open');",
+    );
+    assert!(tabs().status.success());
+    let kept = a.show("tab:safari1");
+    assert_eq!(kept["note"], "come back to this", "a note was destroyed");
+    assert_eq!(
+        kept["availability"], "open",
+        "an unreadable browser closed its tabs"
+    );
+
+    // Now Safari is readable and genuinely has no such tab: closed, not erased.
+    fs::write(
+        &fixture,
+        r#"{"browsers":[{"name":"Google Chrome","ok":true,"reason":"","tabs":[]},
+           {"name":"Safari","ok":true,"reason":"","tabs":[]}]}"#,
+    )
+    .unwrap();
+    assert!(tabs().status.success());
+    let gone = a.show("tab:safari1");
+    assert_eq!(gone["availability"], "closed");
+    assert_eq!(
+        gone["note"], "come back to this",
+        "closing must not erase the note"
+    );
+
+    // Every browser unreadable is an error, not an empty authoritative snapshot.
+    fs::write(
+        &fixture,
+        r#"{"browsers":[{"name":"Google Chrome","ok":false,"reason":"not running","tabs":[]},
+           {"name":"Safari","ok":false,"reason":"not running","tabs":[]}]}"#,
+    )
+    .unwrap();
+    assert!(!tabs().status.success());
 }

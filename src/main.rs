@@ -161,9 +161,15 @@ enum Commands {
     Close {
         id: String,
     },
-    /// Select an existing iTerm2 pane without sending input.
+    /// Jump to a stream's pane, or a specific context, without sending input.
     Focus {
+        /// A row number from `queue`, a stream name, or a context ID.
         id: String,
+        /// The view a row number came from; must match your `queue` call.
+        #[arg(long, default_value = "ranked")]
+        mode: String,
+        #[arg(long)]
+        all: bool,
     },
     /// Read the live visible screen (never persisted).
     Preview {
@@ -267,7 +273,7 @@ fn validate_text(text: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn mode_of(raw: &str) -> Result<Mode> {
+pub fn mode_of(raw: &str) -> Result<Mode> {
     match raw {
         "active" => Ok(Mode::Active),
         "debt" => Ok(Mode::Debt),
@@ -457,7 +463,7 @@ fn execute(conn: &mut Connection, git: &mut Git, command: Commands, t: i64) -> R
             tx.commit()?;
             Ok(json!({"id":id,"message":"Agent report recorded"}))
         }
-        Commands::Focus { id } | Commands::Preview { id } => {
+        Commands::Focus { id, .. } | Commands::Preview { id } => {
             Err(format!("unexpected action dispatch for {id}").into())
         }
         Commands::Doctor => {
@@ -512,9 +518,10 @@ fn dispatch(conn: &mut Connection, git: &mut Git, command: Commands, t: i64) -> 
                 .ok_or("no iTerm pane mapping; run sync or return to the shell manually")?;
             iterm::action(&native, "preview")
         }
-        Commands::Focus { id } => {
-            let id = id.clone();
-            let streams = stream::assemble(conn, git, t, Mode::Ranked, true)?;
+        Commands::Focus { id, mode, all } => {
+            let (id, all) = (id.clone(), *all);
+            let mode = mode_of(mode)?;
+            let streams = stream::assemble(conn, git, t, mode, all)?;
             actions::focus_stream(conn, &streams, &id, t)
         }
         _ => execute(conn, git, command, t),
@@ -549,10 +556,10 @@ fn show_streams(out: &mut impl Write, streams: &[Value], mode: &str) -> Result<(
     }
     writeln!(out, "Work streams ({mode})\n")?;
     for (i, s) in streams.iter().enumerate() {
-        let ordinal = s["ordinal"].as_i64().unwrap_or(i as i64 + 1);
+        let row = i + 1;
         writeln!(
             out,
-            "{ordinal:>3}. {:<52} {:>4}  heat {:<4} debt {}",
+            "{row:>3}. {:<52} {:>4}  heat {:<4} debt {}",
             clean(s["name"].as_str().unwrap_or(""), 52),
             s["score"],
             s["heat_points"],
@@ -598,7 +605,7 @@ fn show_streams(out: &mut impl Write, streams: &[Value], mode: &str) -> Result<(
     }
     writeln!(
         out,
-        "focus <n> jumps to a stream's pane · rank re-orders on demand"
+        "focus --mode {mode} <n> jumps to a row above · rank re-orders on demand"
     )?;
     Ok(())
 }

@@ -56,9 +56,10 @@ Now there are two, and they answer different questions.
 minutes and adds a baseline from the context's last activity, so it does not
 depend on how often you sync. Deliberate acts weigh most (capturing a next
 action, focusing a pane), agent state transitions less, and a changed terminal
-screen least, because a spinner is not progress. A stream takes its hottest
-member's heat plus a fraction of the rest, so a sprawling directory grouping
-cannot outrank real work on breadth alone.
+screen least, because a spinner is not progress. Within a stream the hottest
+member leads and each next one counts half as much, so the total converges and
+breadth alone can never saturate the score: a sprawling directory grouping
+cannot outrank the work actually in progress.
 
 **Debt** is how unfinished something is, with no decay at all: a saved next
 action, a waiting agent, a failure, work from before today that you never
@@ -168,15 +169,18 @@ pane you already looked at.
 stewsh tabs
 ```
 
-A tab joins a stream only when its URL names a repository StewardShell already
-knows, so a pull request page or an issue lands next to the branch it belongs to
-and everything else you have open is left alone. Naming the branch in the URL
-pins the tab to that exact stream.
+A tab joins a stream when it is **on the host that repository actually lives on**
+and its path names the repository, so a pull request page lands next to the
+branch it belongs to while a documentation site that merely mentions the name is
+left alone. Branch names are matched as whole path segments, so `main` does not
+match inside `maintenance`, and naming the branch pins the tab to that exact
+stream.
 
 Tabs are **members, not drivers**. They carry no activity signal, contribute
 nothing to heat or debt, and can never put a stream in your queue. They exist so
-that returning to a piece of work brings its context back. Closing a tab removes
-it on the next `tabs` run.
+that returning to a piece of work brings its context back. A tab that is gone is
+marked closed rather than deleted, because you may have captured a note on it,
+and a browser StewardShell cannot read is never treated as an empty one.
 
 This uses the same macOS Automation permission iTerm2 integration already needs.
 Enumerating arbitrary application windows (an editor, Slack) would need
@@ -185,10 +189,14 @@ Accessibility, which is a broader grant, so it is not built: see the roadmap.
 ## Focus
 
 ```sh
-stewsh focus 2                 # the second stream in the last ranking
-stewsh focus rate-bump         # by name fragment
-stewsh focus iterm:PANE-ID     # a specific pane
+stewsh focus 2                          # the second row of the default queue
+stewsh focus 2 --mode active            # the second row of `queue --mode active`
+stewsh focus rate-bump                  # by name fragment
+stewsh focus iterm:PANE-ID              # a specific pane
 ```
+
+A bare number always means a row of the listing you just read, so pass the same
+`--mode` you passed to `queue`. Names and IDs need no mode.
 
 Focus selects the stream's primary iTerm2 pane without sending it any input, and
 records the jump as activity, because choosing to go somewhere is the clearest
@@ -218,7 +226,10 @@ silently adopting one that happens to share a prefix. Commands you type by hand
 still accept unique prefixes and still refuse ambiguous ones.
 
 The web view speaks the same contract over `GET /api/queue`, `POST /api/rank`,
-`/api/sync`, `/api/focus`, `/api/context`, `/api/stream` and `/api/group`.
+`/api/sync`, `/api/focus`, `/api/context`, `/api/stream` and `/api/group`. It
+serves loopback only and refuses any request whose `Host` is not its own
+address, which is what closes DNS rebinding; the JSON content type already
+blocks ordinary cross-site form posts.
 
 ## Passive zsh integration
 
@@ -235,7 +246,7 @@ Installation never edits your shell configuration.
 ## Storage and privacy
 
 SQLite at `~/.config/stewsh/stewsh.db`, overridable with `--db` or `STEWSH_DB`.
-Existing 0.1 and 0.2 databases migrate transactionally. Files are owner-only on
+Existing 0.1 and 0.2 databases migrate transactionally to schema 3. Files are owner-only on
 Unix and WAL supports concurrent local writers.
 
 Stored: context and stream metadata, next actions, optional command text, agent

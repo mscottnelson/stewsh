@@ -6,7 +6,7 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::{collections::HashMap, fs, path::Path, time::Duration};
 
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 const V1: &str = "CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY, cwd TEXT NOT NULL, command TEXT, exit_code INTEGER,
@@ -61,6 +61,9 @@ const V2: &str = "ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'pa
     CREATE INDEX events_at ON events(at);
     PRAGMA user_version=2;";
 
+const V3: &str = "ALTER TABLE streams ADD COLUMN host TEXT NOT NULL DEFAULT '';
+    PRAGMA user_version=3;";
+
 pub fn open(path: &Path, passive: bool) -> Result<Connection> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
@@ -92,6 +95,9 @@ pub fn open(path: &Path, passive: bool) -> Result<Connection> {
         }
         if version < 2 {
             tx.execute_batch(V2)?;
+        }
+        if version < 3 {
+            tx.execute_batch(V3)?;
         }
         tx.commit()?;
     }

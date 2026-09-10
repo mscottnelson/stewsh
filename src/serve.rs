@@ -74,14 +74,6 @@ where
     }
 }
 
-fn parse_mode(raw: Option<&String>) -> Mode {
-    match raw.map(String::as_str) {
-        Some("debt") => Mode::Debt,
-        Some("ranked") => Mode::Ranked,
-        _ => Mode::Active,
-    }
-}
-
 async fn index() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -100,13 +92,14 @@ async fn alpine() -> impl IntoResponse {
 }
 
 async fn queue(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> Response {
-    let mode = parse_mode(q.get("mode"));
+    let name = q.get("mode").cloned().unwrap_or_else(|| "ranked".into());
     let all = q.get("all").is_some_and(|v| v == "1" || v == "true");
     blocking(app, move |conn, git| {
         let t = now();
-        let streams = stream::assemble(conn, git, t, mode, all)?;
-        Ok(json!({"streams": streams, "as_of": t,
-                  "mode": q.get("mode").cloned().unwrap_or_else(|| "active".into())}))
+        // One mode parser for both surfaces: the web used to accept a mode the
+        // CLI rejects, sort by Active anyway, and echo the bogus name back.
+        let streams = stream::assemble(conn, git, t, crate::mode_of(&name)?, all)?;
+        Ok(json!({"streams": streams, "as_of": t, "mode": name}))
     })
     .await
 }

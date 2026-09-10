@@ -155,6 +155,11 @@ pub fn sync(conn: &mut Connection, now: i64) -> Result<Value> {
     for pane in &panes {
         let id = format!("iterm:{}", pane.id);
         ids.push(id.clone());
+        // Whether this row is ours to date from the shell's age, or already
+        // carries a real timestamp from the zsh hook that we must not disturb.
+        let brand_new = !tx
+            .query_row("SELECT 1 FROM sessions WHERE id=?1", [&id], |_| Ok(()))
+            .is_ok();
         store::ensure(&tx, &id, &pane.cwd, now)?;
         let (fingerprint, old_state, old_state_source, old_availability): (
             String,
@@ -195,6 +200,10 @@ pub fn sync(conn: &mut Connection, now: i64) -> Result<Value> {
             })
             .map(|(_, a)| *a)
             .max();
+        // Only for a row this sync created: a pane the zsh hook already tracks
+        // has an accurate timestamp, and dating it from the shell's age would
+        // push it backwards and erase the activity we are trying to measure.
+        let date_from_shell = brand_new && shell_age.is_some();
         // Screen evidence is weak, but a pane visibly asking a question or
         // showing a failure is worth more than a stale shell state. The zsh
         // hook marks a pane `working` on every command, so without this an
@@ -218,12 +227,12 @@ pub fn sync(conn: &mut Connection, now: i64) -> Result<Value> {
           fingerprint=?8,state=?9,state_source=?10,
           revision=revision+?11,
           last_active_interaction=CASE WHEN ?13=1 THEN ?5
-            WHEN ?14=1 AND ?12 IS NOT NULL THEN MIN(last_active_interaction,?5-?12)
+            WHEN ?14=1 THEN ?5-?12
             ELSE last_active_interaction END,
           creation_time=CASE WHEN ?12 IS NOT NULL THEN MIN(creation_time,?5-?12) ELSE creation_time END,
           age_source=CASE WHEN ?12 IS NOT NULL THEN 'Local shell age estimate' ELSE age_source END WHERE id=?1",
           params![id,pane.name,pane.id,pane.location,now,pane.cwd,agent,digest,state,state_source,
-                  i32::from(semantic),shell_age,i32::from(moved),i32::from(first_sight)])?;
+                  i32::from(semantic),shell_age,i32::from(moved),i32::from(date_from_shell)])?;
         if changed || old_availability != "open" {
             store::event(
                 &tx,
