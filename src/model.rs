@@ -57,14 +57,19 @@ pub struct Reason {
 impl Context {
     /// Debt: how unfinished this is, independent of when it last moved.
     pub fn rank(&mut self, now: i64) {
+        self.score = 0;
+        self.reasons.clear();
+        if self.kind == "tab" {
+            // A browser tab is context to return to, not evidence of activity.
+            self.heat = 0.0;
+            return;
+        }
         let today = Local.timestamp_opt(now, 0).single().map(|d| d.date_naive());
         let started = Local
             .timestamp_opt(self.created_at, 0)
             .single()
             .map(|d| d.date_naive());
         self.older = matches!((started, today), (Some(a), Some(b)) if a < b);
-        self.score = 0;
-        self.reasons.clear();
         let mut add = |points: i32, code: &'static str, text: &'static str| {
             self.score += points;
             self.reasons.push(Reason { points, code, text });
@@ -139,13 +144,21 @@ impl Stream {
                 .cmp(&a.score)
                 .then_with(|| b.last_active.cmp(&a.last_active))
         });
-        let queued: Vec<&Context> = self.members.iter().filter(|m| m.queued(now)).collect();
+        let queued: Vec<&Context> = self
+            .members
+            .iter()
+            .filter(|m| m.kind != "tab" && m.queued(now))
+            .collect();
         let live: &[&Context] = if queued.is_empty() {
             &[]
         } else {
             queued.as_slice()
         };
-        self.heat = live.iter().map(|m| m.heat).sum();
+        // Hottest member leads; the rest contribute, but breadth alone must not
+        // pin a sprawling directory grouping to the ceiling.
+        let mut heats: Vec<f64> = live.iter().map(|m| m.heat).collect();
+        heats.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        self.heat = heats.first().copied().unwrap_or(0.0) + 0.3 * heats.iter().skip(1).sum::<f64>();
         self.debt = live.iter().map(|m| m.score).max().unwrap_or(0);
         self.last_active = self
             .members
@@ -217,7 +230,10 @@ impl Stream {
 
     pub fn queued(&self, now: i64) -> bool {
         !self.archived
-            && (self.members.iter().any(|m| m.queued(now))
+            && (self
+                .members
+                .iter()
+                .any(|m| m.kind != "tab" && m.queued(now))
                 || (self.members.is_empty() && (self.dirty || self.ahead > 0)))
     }
 }

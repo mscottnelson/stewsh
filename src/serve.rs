@@ -115,6 +115,8 @@ struct SyncBody {
     harness: bool,
     #[serde(default)]
     days: Option<i64>,
+    #[serde(default)]
+    tabs: bool,
 }
 fn yes() -> bool {
     true
@@ -141,6 +143,13 @@ async fn sync(State(app): State<App>, Json(body): Json<SyncBody>) -> Response {
             }
         }
         out["regrouped"] = json!(stream::regroup(conn, git, t)?);
+        if body.tabs {
+            let streams = stream::assemble(conn, git, t, Mode::Active, true)?;
+            match crate::browser::sync(conn, &streams, t) {
+                Ok(v) => out["tabs"] = v,
+                Err(e) => out["tabs_error"] = json!(e.to_string()),
+            }
+        }
         Ok(out)
     })
     .await

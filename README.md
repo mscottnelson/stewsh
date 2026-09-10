@@ -53,10 +53,12 @@ The old version had one score and an argument about whether recency was good.
 Now there are two, and they answer different questions.
 
 **Heat** is decayed activity: how live is this right now. It halves every 90
-minutes, sums weighted events, and adds a baseline from the context's last
-activity so it does not depend on how often you sync. Deliberate acts weigh most
-(capturing a next action, focusing a pane), agent state transitions less, and a
-changed terminal screen least, because a spinner is not progress.
+minutes and adds a baseline from the context's last activity, so it does not
+depend on how often you sync. Deliberate acts weigh most (capturing a next
+action, focusing a pane), agent state transitions less, and a changed terminal
+screen least, because a spinner is not progress. A stream takes its hottest
+member's heat plus a fraction of the rest, so a sprawling directory grouping
+cannot outrank real work on breadth alone.
 
 **Debt** is how unfinished something is, with no decay at all: a saved next
 action, a waiting agent, a failure, work from before today that you never
@@ -160,6 +162,26 @@ signal from the visible screen. A changed screen counts as activity but no longe
 counts as a new revision, so a spinner or a log tail cannot silently un-review a
 pane you already looked at.
 
+## Browser tabs
+
+```sh
+stewsh tabs
+```
+
+A tab joins a stream only when its URL names a repository StewardShell already
+knows, so a pull request page or an issue lands next to the branch it belongs to
+and everything else you have open is left alone. Naming the branch in the URL
+pins the tab to that exact stream.
+
+Tabs are **members, not drivers**. They carry no activity signal, contribute
+nothing to heat or debt, and can never put a stream in your queue. They exist so
+that returning to a piece of work brings its context back. Closing a tab removes
+it on the next `tabs` run.
+
+This uses the same macOS Automation permission iTerm2 integration already needs.
+Enumerating arbitrary application windows (an editor, Slack) would need
+Accessibility, which is a broader grant, so it is not built: see the roadmap.
+
 ## Focus
 
 ```sh
@@ -249,7 +271,12 @@ manual override, ranker failure and caching, the evidence document, transcript
 reading, exact-versus-prefix identity, the web endpoints over loopback, iTerm
 snapshots, and the zsh hooks.
 
-Next: an editor and browser window adapter so focusing a stream restores the
-whole workspace rather than one pane, lifecycle hooks for harnesses that offer
-them, tmux and fish adapters, and an MCP surface so an agent already in a session
-can read the queue and report into it. MIT licensed.
+Not built, deliberately: an adapter for arbitrary application windows. It needs
+macOS Accessibility, and when that permission is absent the API returns an empty
+list rather than an error, so a silent no-op is the failure mode. That is the
+worst kind to ship, and it needs a permission check that can tell "nothing open"
+from "not allowed" before it is worth having.
+
+Next: that window adapter, lifecycle hooks for harnesses that offer them, tmux
+and fish adapters, and an MCP surface so an agent already in a session can read
+the queue and report into it. MIT licensed.

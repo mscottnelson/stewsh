@@ -22,7 +22,7 @@ struct Pane {
     location: String,
 }
 
-fn script(source: &str, args: &[&str]) -> Result<String> {
+pub fn script(source: &str, args: &[&str]) -> Result<String> {
     if !cfg!(target_os = "macos") {
         return Err(
             "iTerm2 integration requires macOS; shell tracking and agent reports work here".into(),
@@ -167,7 +167,12 @@ pub fn sync(conn: &mut Connection, now: i64) -> Result<Value> {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
         let digest = format!("{:x}", Sha256::digest(pane.text.trim().as_bytes()));
+        let first_sight = fingerprint.is_empty();
         let changed = fingerprint != digest;
+        // Discovering a pane is not the same as the pane being active. On first
+        // sight we fall back to the shell's own age rather than claiming it just
+        // moved, which would make every pane maximally hot on the first sync.
+        let moved = changed && !first_sight;
         let ps = procs.get(&pane.tty).cloned().unwrap_or_default();
         let agents: Vec<_> = ["claude", "codex", "devin"]
             .into_iter()
@@ -209,10 +214,14 @@ pub fn sync(conn: &mut Connection, now: i64) -> Result<Value> {
         tx.execute("UPDATE sessions SET name=?2,source='iterm',native_id=?3,location=?4,availability='open',observed_at=?5,
           cwd=CASE WHEN ?6!='' THEN ?6 ELSE cwd END,agent=CASE WHEN state_source='agent' THEN agent ELSE ?7 END,
           fingerprint=?8,state=?9,state_source=?10,
-          revision=revision+?11,last_active_interaction=CASE WHEN ?13=1 THEN ?5 ELSE last_active_interaction END,
+          revision=revision+?11,
+          last_active_interaction=CASE WHEN ?13=1 THEN ?5
+            WHEN ?14=1 AND ?12 IS NOT NULL THEN MIN(last_active_interaction,?5-?12)
+            ELSE last_active_interaction END,
           creation_time=CASE WHEN ?12 IS NOT NULL THEN MIN(creation_time,?5-?12) ELSE creation_time END,
           age_source=CASE WHEN ?12 IS NOT NULL THEN 'Local shell age estimate' ELSE age_source END WHERE id=?1",
-          params![id,pane.name,pane.id,pane.location,now,pane.cwd,agent,digest,state,state_source,i32::from(semantic),shell_age,i32::from(changed)])?;
+          params![id,pane.name,pane.id,pane.location,now,pane.cwd,agent,digest,state,state_source,
+                  i32::from(semantic),shell_age,i32::from(moved),i32::from(first_sight)])?;
         if changed || old_availability != "open" {
             store::event(
                 &tx,

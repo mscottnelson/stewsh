@@ -1,4 +1,5 @@
 mod actions;
+mod browser;
 mod harness;
 mod iterm;
 mod model;
@@ -199,6 +200,8 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Attach open browser tabs that name a repository you are working in.
+    Tabs,
     /// Read Claude Code and Codex transcripts; no hook installation needed.
     Agents {
         #[arg(long, default_value_t = harness::DEFAULT_WINDOW_DAYS, value_parser = clap::value_parser!(i64).range(1..=365))]
@@ -281,6 +284,10 @@ fn execute(conn: &mut Connection, git: &mut Git, command: Commands, t: i64) -> R
             let mut out = iterm::sync(conn, t)?;
             out["regrouped"] = json!(stream::regroup(conn, git, t)?);
             Ok(out)
+        }
+        Commands::Tabs => {
+            let streams = stream::assemble(conn, git, t, Mode::Active, true)?;
+            browser::sync(conn, &streams, t)
         }
         Commands::Agents { days } => {
             let mut out = harness::sync(conn, t, days)?;

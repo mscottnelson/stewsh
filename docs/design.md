@@ -56,7 +56,11 @@ prefix with the ID it invented.
 **Heat** is decayed activity with a 90-minute half-life. It sums weighted events
 and adds a baseline decayed from the context's last activity, so it measures how
 recently work was live rather than how often the user ran `sync`. Deliberate
-user acts weigh most, agent transitions less, screen changes least.
+user acts weigh most, agent transitions less, screen changes least. Discovering
+a pane is not activity: on first sight heat falls back to the shell's own age,
+because otherwise the first sync would report every pane as maximally hot. A
+stream takes its hottest member plus a fraction of the rest, so breadth alone
+cannot pin a directory grouping to the ceiling.
 
 **Debt** is unfinished-ness with no decay: notes, waiting agents, failures,
 unreviewed work from before today, and repo evidence — dirty trees, unpushed
@@ -140,10 +144,17 @@ dependable at remembering, grouping and prioritizing.
 
 ## Roadmap
 
-**Next.** An editor and browser window adapter, so focusing a stream restores the
-whole workspace rather than one pane. The split that keeps this honest: contexts
-with activity signals generate attention, while windows and tabs only receive
-focus, so a stale browser tab can never drive the queue.
+**Delivered, and the rule that keeps it honest.** Contexts with activity signals
+generate attention; windows and tabs only receive focus. A browser tab therefore
+attaches to a stream, contributes nothing to heat or debt, and can never put
+work in the queue. Tabs join only when their URL names a known repository, so
+the rest of the browser is ignored.
+
+**Next.** Arbitrary application windows. Browser tabs use the Automation
+permission iTerm already requires; enumerating an editor or chat window needs
+Accessibility, which is broader and, when denied, returns an empty list rather
+than an error. Shipping a silent no-op is worse than not shipping, so this waits
+on a permission probe that distinguishes "nothing open" from "not allowed".
 
 **Then.** Lifecycle hooks for harnesses that offer them, promoting inference to
 ground truth. tmux, Bash and fish adapters. An MCP surface so an agent already in

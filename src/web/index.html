@@ -149,7 +149,8 @@ kbd{border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;paddi
                 <template x-if="m.handoff"><div class="sub" x-text="m.handoff"></div></template>
               </div>
               <div class="acts">
-                <button @click="focus(m.id)" x-show="m.native_id">Focus</button>
+                <button @click="focus(m.id)" x-show="m.native_id || m.kind==='tab'"
+                  x-text="m.kind==='tab'?'Open tab':'Focus'"></button>
                 <button @click="capture(m)">Note</button>
                 <button @click="act('context',m.id,'review')">Review</button>
                 <button @click="act('context',m.id,'snooze')">Snooze</button>
@@ -194,8 +195,9 @@ function steward(){return{
     if(this.cursor>=this.streams.length) this.cursor=Math.max(0,this.streams.length-1);
   },
   async sync(){
-    const d=await this.api('/api/sync',{iterm:true,harness:true});
+    const d=await this.api('/api/sync',{iterm:true,harness:true,tabs:true});
     if(d) this.say(`${d.harness?.agent_sessions??0} agent sessions · ${d.iterm?.open_panes??0} panes`
+      + ` · ${d.tabs?.attached??0} tabs`
       + (d.iterm_error?' · iTerm: '+d.iterm_error:''));
     await this.load();
   },

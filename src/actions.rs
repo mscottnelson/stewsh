@@ -1,7 +1,7 @@
 //! Actions shared by the CLI and the web view, so both surfaces cannot drift.
 use crate::{
-    iterm,
-    model::{slug, Stream},
+    browser, iterm,
+    model::{slug, Context, Stream},
     store, stream, Result,
 };
 use chrono::{Local, TimeZone};
@@ -31,6 +31,26 @@ fn validate(text: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Bring one member to the front, whatever kind of thing it is.
+fn raise(c: &Context) -> Result<Value> {
+    if let Some(native) = &c.native_id {
+        return iterm::action(native, "focus");
+    }
+    if c.kind == "tab" {
+        let url = c
+            .external_ref
+            .as_deref()
+            .ok_or("this tab has no recorded URL; run tabs to refresh")?;
+        return browser::focus(url);
+    }
+    Err(format!(
+        "{} is an agent session with no window; its transcript is {}",
+        c.name,
+        c.external_ref.as_deref().unwrap_or("not recorded")
+    )
+    .into())
+}
+
 /// Jump to a stream's primary pane. Focusing is a declaration of intent, so it
 /// counts as activity and warms the stream it lands on.
 pub fn focus_stream(
@@ -44,11 +64,7 @@ pub fn focus_stream(
         // A bare context ID should still work from either surface.
         Err(e) => match store::find(conn, query, t) {
             Ok(c) => {
-                let native = c
-                    .native_id
-                    .clone()
-                    .ok_or("no iTerm pane mapping; run sync or return to the shell manually")?;
-                let result = iterm::action(&native, "focus")?;
+                let result = raise(&c)?;
                 store::event(conn, &c.id, t, "focused", json!({"via": "context"}), None)?;
                 return Ok(json!({"focused": c.id, "result": result}));
             }
@@ -59,31 +75,31 @@ pub fn focus_stream(
     if candidates.is_empty() {
         candidates = s.members.iter().collect();
     }
-    let pane = candidates
+    // A terminal pane is the destination when there is one; a tab is the next
+    // best thing; an agent transcript is neither, so say so plainly.
+    let target = candidates
         .iter()
         .find(|m| m.native_id.is_some())
-        .or_else(|| candidates.first());
-    let Some(target) = pane else {
+        .or_else(|| candidates.iter().find(|m| m.kind == "tab"))
+        .copied();
+    let Some(target) = target else {
+        let lives = if s.worktree.is_empty() {
+            s.repo.as_str()
+        } else {
+            s.worktree.as_str()
+        };
         return Err(format!(
-            "stream {} has no open pane; its work lives at {}",
+            "stream {} has no pane or tab to focus; its work lives at {}",
             s.name,
-            if s.worktree.is_empty() {
-                &s.repo
+            if lives.is_empty() {
+                "no recorded location"
             } else {
-                &s.worktree
+                lives
             }
         )
         .into());
     };
-    let Some(native) = target.native_id.clone() else {
-        return Err(format!(
-            "{} is an agent session with no terminal pane; its transcript is {}",
-            target.name,
-            target.external_ref.as_deref().unwrap_or("not recorded")
-        )
-        .into());
-    };
-    let result = iterm::action(&native, "focus")?;
+    let result = raise(target)?;
     store::event(
         conn,
         &target.id,
