@@ -275,7 +275,14 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo build --release --locked
+CARGO_TARGET_DIR=target/package-check cargo package --locked
 ```
+
+Give `cargo package` its own target directory. Sharing the default one leaves
+the build fingerprint describing the packaged copy of the sources, after which
+`cargo build` reports `Fresh` and silently keeps a stale binary no matter what
+you edit. It is reproducible: edit a file and build after a plain `cargo
+package`, and nothing recompiles.
 
 Tests cover migration, heat decay against undecayed debt, stream grouping with
 manual override, ranker failure and caching, the evidence document, transcript
