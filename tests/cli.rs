@@ -745,3 +745,35 @@ fn focusing_a_stream_selects_its_pane_and_counts_as_intent() {
         .clone();
     assert!(events.iter().any(|e| e["kind"] == "focused"));
 }
+
+#[test]
+fn regrouping_does_not_orphan_browser_tabs() {
+    let a = App::new();
+    a.run(&["track", "pane-one"]);
+    a.run(&["group", "pane-one", "--to", "Alpha"]);
+    // Stand in for the browser adapter: a tab has no working directory, so a
+    // regroup keyed on cwd would file it under "unassigned".
+    a.sql(
+        "INSERT INTO sessions(id,cwd,creation_time,last_active_interaction,kind,source,name,external_ref)
+         VALUES('tab:abc','',1,1,'tab','browser','PR 12','https://github.com/acme/x/pull/12');
+         INSERT INTO stream_members(stream_id,context_id,role,origin)
+         VALUES('alpha','tab:abc','tab','auto');",
+    );
+    a.run(&["track", "pane-two"]); // forces a regroup on the next assemble
+    let streams = a.run(&["queue", "--all", "--limit", "200"])["streams"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let alpha = streams.iter().find(|s| s["id"] == "alpha").unwrap();
+    let ids: Vec<&str> = alpha["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"tab:abc"), "tab was orphaned by regrouping");
+    // And a tab contributes nothing to the queue's scoring.
+    let tab = a.show("tab:abc");
+    assert_eq!(tab["score"], 0);
+    assert_eq!(tab["heat"].as_f64().unwrap(), 0.0);
+}

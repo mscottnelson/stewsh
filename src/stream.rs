@@ -122,6 +122,10 @@ pub fn regroup(conn: &mut Connection, git: &mut Git, now: i64) -> Result<usize> 
         ensure(&tx, &s, now)?;
     }
     for c in &contexts {
+        if c.kind == "tab" {
+            // A tab is placed by URL, not by a working directory it lacks.
+            continue;
+        }
         let info = git.info(&c.cwd);
         let (key, name) = key_for(info.as_ref(), &c.cwd);
         let id = slug(&key);
