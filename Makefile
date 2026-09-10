@@ -12,18 +12,19 @@ PORT  ?= 7777
 # The dev loop keeps its own database, so a half-written migration cannot reach
 # the real queue. `stewsh agents` and `sync` refill it from the same sources.
 # For real data: make dev DB=~/.config/stewsh/stewsh.db
-DB    ?= .dev/stewsh.db
+DEV_DB := .dev/stewsh.db
+DB    ?= $(DEV_DB)
 
 ##@ Development
 
 dev: ## Serve the web view, rebuilding and restarting on every change
-	@STEWSH_DB=$(DB) scripts/dev.sh serve --port $(PORT) --no-open
+	@CARGO='$(CARGO)' STEWSH_DB='$(DB)' scripts/dev.sh serve --port $(PORT) --no-open
 
 watch: ## Type-check on every change: no link, fastest feedback
-	@scripts/dev.sh check
+	@CARGO='$(CARGO)' scripts/dev.sh check
 
 run: ## Build and serve once, against the dev database
-	@STEWSH_DB=$(DB) $(CARGO) run --locked -- serve --port $(PORT)
+	@STEWSH_DB='$(DB)' $(CARGO) run -- serve --port $(PORT)
 
 ##@ Build
 
@@ -50,21 +51,30 @@ fmt: ## Format
 lint: ## Clippy, with warnings as errors
 	$(CARGO) clippy --locked --all-targets -- -D warnings
 
+# Two deviations from the workflow file, both so this is runnable before a
+# commit. `cargo package` gets its own target directory, because sharing the
+# default one leaves the fingerprint describing the packaged sources, after
+# which every later build reports Fresh and keeps a stale binary. It also gets
+# --allow-dirty, which drops cargo's own clean-tree check -- so the guard below
+# restores the half that matters: an untracked file under a packaged path is
+# absent from CI's checkout and fails there, while uncommitted edits to tracked
+# files are packaged the same either way.
 ci: ## Every check CI runs, in CI's order
 	$(CARGO) fmt --check
 	$(CARGO) clippy --locked --all-targets -- -D warnings
 	$(CARGO) test --locked
-	# Its own target directory: sharing the default one leaves the fingerprint
-	# describing the packaged sources, after which every build reports Fresh and
-	# keeps a stale binary. --allow-dirty so this is runnable before committing;
-	# CI packages a clean checkout, where the two are equivalent.
+	@new=$$(git status --porcelain --untracked-files=all -- src Cargo.toml Cargo.lock | grep '^??' || true); \
+	  [ -z "$$new" ] || { printf 'make ci: untracked file under a packaged path:\n%s\n' "$$new"; \
+	  echo 'git add it, or this packages a tree CI will not have.'; exit 1; }
 	CARGO_TARGET_DIR=target/package-check $(CARGO) package --locked --allow-dirty
 
 ##@ Housekeeping
 
+# Deliberately $(DEV_DB) and not $(DB): `make clean DB=~/.config/stewsh/stewsh.db`
+# must not delete the real queue.
 clean: ## Remove build artifacts and the dev database
 	$(CARGO) clean
-	rm -f .dev/stewsh.db .dev/stewsh.db-wal .dev/stewsh.db-shm
+	rm -f $(DEV_DB) $(DEV_DB)-wal $(DEV_DB)-shm
 
 help: ## Show this help
 	@awk 'BEGIN { FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n" } \
