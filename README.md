@@ -205,7 +205,7 @@ no terminal report where the work lives instead.
 
 ## Agent-friendly contract
 
-Every command takes `--json`:
+Every command except the interactive `serve` and `shell` takes `--json`:
 
 ```sh
 stewsh queue --json --mode active
