@@ -23,20 +23,30 @@ command -v fswatch >/dev/null || {
 
 bin=target/debug/stewsh
 child=
+watcher=
 
 # Block until something that affects the build changes. Excluding everything
 # and re-including by extension keeps editor swap files and target/ out.
+# The watcher is backgrounded and waited on rather than run in the foreground:
+# bash defers a trap until the foreground child exits, so a loop signalled
+# directly would leave the server orphaned on the port.
 await_change() {
 	fswatch -1 -r -l 0.2 -E \
 		-e '.*' -i '\.rs$' -i '\.html$' -i '\.js$' -i 'Cargo\.(toml|lock)$' \
-		src Cargo.toml Cargo.lock >/dev/null
+		src Cargo.toml Cargo.lock >/dev/null &
+	watcher=$!
+	wait "$watcher" 2>/dev/null || true
+	watcher=
 }
 
 stop() {
-	[ -n "$child" ] || return 0
-	kill "$child" 2>/dev/null || true
-	wait "$child" 2>/dev/null || true
+	for pid in "$child" "$watcher"; do
+		[ -n "$pid" ] || continue
+		kill "$pid" 2>/dev/null || true
+		wait "$pid" 2>/dev/null || true
+	done
 	child=
+	watcher=
 }
 
 trap 'stop; exit 0' INT TERM
