@@ -50,11 +50,15 @@ fmt: ## Format
 lint: ## Clippy, with warnings as errors
 	$(CARGO) clippy --locked --all-targets -- -D warnings
 
-ci: ## Everything CI runs, in CI's order
+ci: ## Every check CI runs, in CI's order
 	$(CARGO) fmt --check
 	$(CARGO) clippy --locked --all-targets -- -D warnings
 	$(CARGO) test --locked
-	$(CARGO) package --locked
+	# Its own target directory: sharing the default one leaves the fingerprint
+	# describing the packaged sources, after which every build reports Fresh and
+	# keeps a stale binary. --allow-dirty so this is runnable before committing;
+	# CI packages a clean checkout, where the two are equivalent.
+	CARGO_TARGET_DIR=target/package-check $(CARGO) package --locked --allow-dirty
 
 ##@ Housekeeping
 
