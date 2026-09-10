@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StewardShell</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%233b6ea5'/%3E%3Crect x='3' y='4' width='10' height='2' rx='1' fill='white'/%3E%3Crect x='3' y='7' width='7' height='2' rx='1' fill='white' opacity='.75'/%3E%3Crect x='3' y='10' width='4' height='2' rx='1' fill='white' opacity='.5'/%3E%3C/svg%3E">
+<script defer src="/alpine.js"></script>
+<style>
+:root{
+  --bg:#f7f7f5; --panel:#fff; --line:#e2e1dc; --ink:#1b1a17; --muted:#6f6d66;
+  --accent:#3b6ea5; --hot:#c2410c; --ok:#3f7d54; --warn:#a8620a; --sel:#eef3f9;
+  --radius:10px;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#16161a; --panel:#1e1e23; --line:#32323a; --ink:#e8e7e3; --muted:#9b998f;
+  --accent:#7aa8d8; --hot:#f08b5a; --ok:#7fbf95; --warn:#d6a25a; --sel:#26313d;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 ui-sans-serif,-apple-system,"SF Pro Text",Segoe UI,system-ui,sans-serif}
+header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:14px 20px}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;max-width:1100px;margin:0 auto}
+h1{font-size:15px;margin:0 12px 0 0;font-weight:640;letter-spacing:-.01em}
+button,select,input{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 11px}
+button{cursor:pointer}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button.primary:hover{filter:brightness(1.08)}
+input.intent{flex:1;min-width:180px}
+main{max-width:1100px;margin:0 auto;padding:18px 20px 90px}
+.stream{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);margin-bottom:10px;overflow:hidden}
+.stream.sel{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 22%,transparent)}
+.row{display:flex;gap:12px;padding:12px 14px;cursor:pointer;align-items:flex-start}
+.ord{font-variant-numeric:tabular-nums;font-weight:660;color:var(--muted);min-width:22px;text-align:right;padding-top:1px}
+.grow{flex:1;min-width:0}
+.name{font-weight:600;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:12.5px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.why{margin-top:6px;font-size:13px}
+.next{margin-top:3px;font-size:13px;color:var(--accent)}
+.tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}
+.tag{font-size:11.5px;padding:1.5px 7px;border-radius:20px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.tag.hot{color:var(--hot);border-color:color-mix(in srgb,var(--hot) 45%,var(--line))}
+.tag.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+.tag.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
+.score{text-align:right;font-variant-numeric:tabular-nums}
+.score b{font-size:17px;font-weight:660}
+.score span{display:block;font-size:11px;color:var(--muted)}
+.members{border-top:1px solid var(--line);background:color-mix(in srgb,var(--bg) 55%,var(--panel))}
+.member{display:flex;gap:10px;padding:9px 14px 9px 48px;border-bottom:1px solid var(--line);align-items:center;font-size:13px}
+.member:last-child{border-bottom:0}
+.member .grow{overflow:hidden}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:var(--muted)}
+.acts{display:flex;gap:5px;flex-wrap:wrap}
+.acts button{padding:3px 8px;font-size:12px;border-radius:6px}
+.empty{text-align:center;color:var(--muted);padding:60px 20px}
+.flash{position:fixed;left:50%;transform:translateX(-50%);bottom:22px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 15px;box-shadow:0 6px 22px rgba(0,0,0,.16);max-width:80vw}
+.flash.bad{border-color:var(--hot);color:var(--hot)}
+.keys{color:var(--muted);font-size:11.5px;margin-left:auto}
+kbd{border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px;font:inherit;font-size:11px}
+.spin{opacity:.55;pointer-events:none}
+.bars{display:flex;height:4px;border-radius:3px;overflow:hidden;margin-top:8px;background:var(--line)}
+.bars i{display:block;height:100%}
+</style>
+</head>
+<body x-data="steward()" x-init="load()" @keydown.window="key($event)">
+<header>
+  <div class="bar">
+    <h1>StewardShell</h1>
+    <button @click="sync()" :class="busy&&'spin'">Sync</button>
+    <input class="intent" x-model="intent" placeholder="What are you trying to get done? (optional, guides the ranker)">
+    <button class="primary" @click="rank()" :class="busy&&'spin'">Rank</button>
+    <select x-model="mode" @change="load()">
+      <option value="ranked">Ranked order</option>
+      <option value="active">Active (heat led)</option>
+      <option value="debt">Debt (morning)</option>
+    </select>
+    <label class="tag"><input type="checkbox" x-model="all" @change="load()" style="vertical-align:-1px"> show all</label>
+    <span class="keys"><kbd>j</kbd><kbd>k</kbd> move · <kbd>↵</kbd> focus · <kbd>r</kbd> rank · <kbd>s</kbd> sync · <kbd>p</kbd> pin · <kbd>e</kbd> expand</span>
+  </div>
+</header>
+
+<main>
+  <template x-if="!streams.length">
+    <div class="empty">
+      <p>Nothing tracked yet.</p>
+      <p>Press <kbd>s</kbd> to sync agent sessions and iTerm panes.</p>
+    </div>
+  </template>
+
+  <template x-for="(s,i) in streams" :key="s.id">
+    <div class="stream" :class="i===cursor&&'sel'">
+      <div class="row" @click="cursor=i; s.open=!s.open">
+        <div class="ord" x-text="s.ordinal ?? (i+1)"></div>
+        <div class="grow">
+          <div class="name" x-text="s.name"></div>
+          <div class="sub">
+            <span x-text="s.key"></span>
+            <template x-if="s.worktree"><span> · worktree <span x-text="short(s.worktree)"></span></span></template>
+            <span> · <span x-text="s.members.length"></span> member(s) · <span x-text="ago(s.last_active)"></span></span>
+          </div>
+          <template x-if="s.why"><div class="why" x-text="s.why"></div></template>
+          <template x-if="s.next"><div class="next" x-text="'→ ' + s.next"></div></template>
+          <div class="tags">
+            <span class="tag" :class="badge(s.state)" x-text="s.state"></span>
+            <template x-if="s.pinned"><span class="tag warn">pinned</span></template>
+            <template x-if="s.dirty"><span class="tag warn">uncommitted</span></template>
+            <template x-if="s.ahead>0"><span class="tag warn" x-text="s.ahead+' unpushed'"></span></template>
+            <template x-if="s.pr"><span class="tag" :class="s.pr.checks==='failing'?'hot':(s.pr.checks==='passing'?'ok':'warn')"
+              x-text="'PR #'+s.pr.number+' '+s.pr.checks"></span></template>
+            <template x-if="s.confidence!==null && s.confidence<0.4 && s.why">
+              <span class="tag">low confidence</span></template>
+          </div>
+          <div class="bars" :title="'heat '+s.heat_points+' · debt '+s.debt">
+            <i :style="`width:${pct(s.heat_points,s)}%;background:var(--hot)`"></i>
+            <i :style="`width:${pct(s.debt,s)}%;background:var(--accent)`"></i>
+          </div>
+        </div>
+        <div class="score">
+          <b x-text="s.score"></b>
+          <span x-text="'heat '+s.heat_points"></span>
+          <span x-text="'debt '+s.debt"></span>
+        </div>
+      </div>
+
+      <template x-if="s.open">
+        <div class="members">
+          <div class="member">
+            <div class="acts">
+              <button class="primary" @click="focus(s)">Focus pane</button>
+              <button @click="act('stream',s.id,s.pinned?'unpin':'pin')" x-text="s.pinned?'Unpin':'Pin'"></button>
+              <button @click="act('stream',s.id,'review')">Review all</button>
+              <button @click="act('stream',s.id,'snooze')">Snooze all</button>
+              <button @click="act('stream',s.id,'resolve')">Resolve all</button>
+              <button @click="rename(s)">Rename</button>
+              <button @click="act('stream',s.id,'archive')">Archive</button>
+            </div>
+          </div>
+          <template x-for="m in s.members" :key="m.id">
+            <div class="member">
+              <div class="grow">
+                <div><span x-text="m.name || m.id"></span>
+                  <span class="tag" :class="badge(m.state)" x-text="m.state"></span>
+                  <span class="tag" x-text="m.agent"></span>
+                  <span class="tag" x-text="m.kind"></span>
+                  <template x-if="m.availability==='closed'"><span class="tag">closed</span></template>
+                </div>
+                <div class="mono" x-text="m.id + (m.location?' · '+m.location:'')"></div>
+                <template x-if="m.note"><div class="next" x-text="'→ '+m.note"></div></template>
+                <template x-if="m.handoff"><div class="sub" x-text="m.handoff"></div></template>
+              </div>
+              <div class="acts">
+                <button @click="focus(m.id)" x-show="m.native_id">Focus</button>
+                <button @click="capture(m)">Note</button>
+                <button @click="act('context',m.id,'review')">Review</button>
+                <button @click="act('context',m.id,'snooze')">Snooze</button>
+                <button @click="act('context',m.id,'resolve')">Resolve</button>
+                <button @click="regroup(m)">Move…</button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>
+    </div>
+  </template>
+</main>
+
+<template x-if="flash">
+  <div class="flash" :class="flashBad&&'bad'" x-text="flash"></div>
+</template>
+
+<script>
+function steward(){return{
+  streams:[], cursor:0, mode:'ranked', all:false, intent:'', busy:false, flash:'', flashBad:false,
+
+  async api(path,body){
+    this.busy=true;
+    try{
+      const r=await fetch(path,body?{method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify(body)}:{});
+      const j=await r.json();
+      if(!j.ok) throw new Error(j.error?.message||'request failed');
+      return j.data;
+    }catch(e){ this.say(e.message,true); return null; }
+    finally{ this.busy=false; }
+  },
+  say(msg,bad){ this.flash=msg; this.flashBad=!!bad; clearTimeout(this._t);
+    this._t=setTimeout(()=>this.flash='',bad?6000:2800); },
+
+  async load(){
+    const open=new Set(this.streams.filter(s=>s.open).map(s=>s.id));
+    const d=await this.api(`/api/queue?mode=${this.mode}&all=${this.all?1:0}`);
+    if(!d) return;
+    this.streams=d.streams.map(s=>({...s,open:open.has(s.id)}));
+    if(this.cursor>=this.streams.length) this.cursor=Math.max(0,this.streams.length-1);
+  },
+  async sync(){
+    const d=await this.api('/api/sync',{iterm:true,harness:true});
+    if(d) this.say(`${d.harness?.agent_sessions??0} agent sessions · ${d.iterm?.open_panes??0} panes`
+      + (d.iterm_error?' · iTerm: '+d.iterm_error:''));
+    await this.load();
+  },
+  async rank(){
+    const d=await this.api('/api/rank',{intent:this.intent||null,force:false});
+    if(d){ this.mode='ranked';
+      this.say(d.fallback?('Ranker failed, deterministic order kept: '+d.fallback)
+        : d.cached?'Nothing changed; cached ranking reused.'
+        : (d.note||`Ranked ${d.ranking?.length??0} streams.`), !!d.fallback); }
+    await this.load();
+  },
+  async focus(target){
+    const id=typeof target==='string'?target:target.id;
+    const d=await this.api('/api/focus',{stream:id});
+    if(d) this.say('Focused '+(d.location||d.focused));
+  },
+  async act(scope,id,action,value,minutes){
+    const d=await this.api('/api/'+scope,{id,action,value:value??null,minutes:minutes??null});
+    if(d) this.say(action+' · '+(d.name||d.id));
+    await this.load();
+  },
+  async capture(m){
+    const note=prompt('Next action for '+(m.name||m.id),m.note||'');
+    if(note===null) return;
+    await this.act('context',m.id,note.trim()?'capture':'clear',note.trim());
+  },
+  async rename(s){
+    const name=prompt('Rename stream',s.name);
+    if(name&&name.trim()) await this.act('stream',s.id,'rename',name.trim());
+  },
+  async regroup(m){
+    const names=this.streams.map(s=>s.name).join(', ');
+    const target=prompt('Move '+(m.name||m.id)+' to which stream?\n\nExisting: '+names,'');
+    if(!target||!target.trim()) return;
+    const d=await this.api('/api/group',{context:m.id,stream:target.trim()});
+    if(d) this.say('Moved to '+d.name);
+    await this.load();
+  },
+
+  key(e){
+    if(/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)){ if(e.key==='Enter'&&e.target.classList.contains('intent')) this.rank(); return; }
+    const s=this.streams[this.cursor];
+    const go=n=>{ this.cursor=Math.min(Math.max(0,this.cursor+n),this.streams.length-1);
+      document.querySelectorAll('.stream')[this.cursor]?.scrollIntoView({block:'nearest'}); };
+    switch(e.key){
+      case 'j': case 'ArrowDown': e.preventDefault(); go(1); break;
+      case 'k': case 'ArrowUp': e.preventDefault(); go(-1); break;
+      case 'e': if(s) s.open=!s.open; break;
+      case 'Enter': if(s) this.focus(s); break;
+      case 'r': this.rank(); break;
+      case 's': this.sync(); break;
+      case 'p': if(s) this.act('stream',s.id,s.pinned?'unpin':'pin'); break;
+      case 'x': if(s) this.act('stream',s.id,'resolve'); break;
+      case 'z': if(s) this.act('stream',s.id,'snooze'); break;
+    }
+  },
+
+  badge(state){ return {waiting:'hot',failed:'hot',ready:'warn',working:'ok'}[state]||''; },
+  pct(v,s){ const total=Math.max(1,s.heat_points+s.debt); return Math.round(v/total*100); },
+  short(p){ return p.length>44?'…'+p.slice(-42):p; },
+  ago(t){
+    if(!t) return 'never';
+    const d=Math.max(0,Math.floor(Date.now()/1000)-t);
+    if(d<90) return d+'s ago';
+    if(d<5400) return Math.round(d/60)+'m ago';
+    if(d<172800) return Math.round(d/3600)+'h ago';
+    return Math.round(d/86400)+'d ago';
+  },
+}}
+</script>
+</body>
+</html>
