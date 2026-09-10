@@ -777,3 +777,254 @@ fn regrouping_does_not_orphan_browser_tabs() {
     assert_eq!(tab["score"], 0);
     assert_eq!(tab["heat"].as_f64().unwrap(), 0.0);
 }
+
+#[test]
+fn a_large_transcript_survives_a_split_character_at_the_tail_offset() {
+    let a = App::new();
+    let home = a.root.join("home");
+    let project = home.join(".claude/projects/-tmp-big");
+    fs::create_dir_all(&project).unwrap();
+    let cwd = a.root.to_string_lossy().into_owned();
+    let trailer = format!(
+        "{}\n{}\n",
+        serde_json::json!({"type":"ai-title","aiTitle":"Long session","sessionId":"big-1"}),
+        serde_json::json!({"type":"assistant","cwd":cwd,"gitBranch":"main",
+            "timestamp":"2026-09-09T10:01:00.000Z",
+            "message":{"content":[{"text":"still here"}]}}),
+    );
+    // Place the 256 KiB tail offset inside a run of two-byte characters, on a
+    // continuation byte. That is what made a strict UTF-8 read fail, empty the
+    // buffer, and silently drop a live session. One ASCII byte flips parity, so
+    // this needs at most two attempts rather than a search.
+    let path = project.join("big-1.jsonl");
+    let build = |shim: usize| {
+        format!(
+            "{{\"type\":\"user\",\"cwd\":\"{cwd}\",\"gitBranch\":\"main\",\"message\":{{\"content\":\"{}{}\"}}}}\n{trailer}",
+            "x".repeat(shim),
+            "\u{e9}".repeat(160_000)
+        )
+    };
+    let body = (0..2)
+        .map(build)
+        .find(|b| {
+            let bytes = b.as_bytes();
+            bytes.len() > 262_144 && bytes[bytes.len() - 262_144] & 0b1100_0000 == 0b1000_0000
+        })
+        .expect("one of the two paddings splits a character at the tail offset");
+    fs::write(&path, &body).unwrap();
+
+    let out = a
+        .command()
+        .arg("--json")
+        .args(["agents", "--days", "365"])
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], true, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        v["data"]["agent_sessions"], 1,
+        "split character dropped the session"
+    );
+    let s = a.show("claude:big-1");
+    assert_eq!(s["name"], "Long session");
+    assert_eq!(
+        s["availability"], "open",
+        "a live session was closed as absent"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn screen_evidence_still_reaches_a_pane_the_shell_hook_marked_working() {
+    use std::os::unix::fs::PermissionsExt;
+    let a = App::new();
+    let mock = a.root.join("osascript");
+    fs::write(&mock, "#!/bin/sh\ncat \"$STEWSH_TEST_PANES\"\n").unwrap();
+    fs::set_permissions(&mock, fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = a.root.join("panes.json");
+    let pane = |text: &str| {
+        format!(
+            r#"[{{"id":"p9","name":"Agent","tty":"/dev/no-test-tty","cwd":"/work","text":"{text}","prompt":false,"location":"W1"}}]"#
+        )
+    };
+    let sync = || {
+        a.command()
+            .args(["--json", "sync"])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    a.root.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("STEWSH_TEST_PANES", &fixture)
+            .output()
+            .unwrap()
+    };
+    fs::write(&fixture, pane("ready")).unwrap();
+    assert!(sync().status.success());
+    // The zsh hook marks the pane working on every command it runs.
+    a.run(&["track", "iterm:p9", "--state", "working"]);
+    assert_eq!(a.show("iterm:p9")["state_source"], "shell");
+
+    // The agent then asks a question. That must reach the queue.
+    fs::write(&fixture, pane("Do you want to proceed? [y/n]")).unwrap();
+    assert!(sync().status.success());
+    let s = a.show("iterm:p9");
+    assert_eq!(s["state"], "waiting", "screen evidence was discarded");
+    assert_eq!(s["state_source"], "screen");
+
+    // An explicit agent report still outranks the screen.
+    a.run(&[
+        "report",
+        "working",
+        "--session-id",
+        "iterm:p9",
+        "--agent",
+        "claude",
+    ]);
+    fs::write(&fixture, pane("error: something failed")).unwrap();
+    assert!(sync().status.success());
+    let s = a.show("iterm:p9");
+    assert_eq!(s["state"], "working", "an agent report must keep its veto");
+    assert_eq!(s["state_source"], "agent");
+}
+
+/// Starts the web view and returns its base URL plus the child to kill.
+#[cfg(unix)]
+fn serve(a: &App) -> (String, std::process::Child) {
+    use std::io::{BufRead, BufReader};
+    let mut child = a
+        .command()
+        .args(["serve", "--port", "0", "--no-open"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let url = line
+        .split_whitespace()
+        .find(|w| w.starts_with("http://"))
+        .expect("server prints its URL")
+        .to_string();
+    (url, child)
+}
+
+#[cfg(unix)]
+#[test]
+fn the_web_view_answers_only_to_its_own_loopback_address() {
+    let a = App::new();
+    a.run(&["track", "one"]);
+    let (url, mut child) = serve(&a);
+    let code = |args: &[&str]| -> String {
+        let out = Command::new("curl")
+            .args(["-s", "-o", "/dev/null", "-w", "%{http_code}"])
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let ours = code(&[&format!("{url}/api/queue")]);
+    // A rebound browser still sends the attacker's name in Host.
+    let foreign = code(&["-H", "Host: evil.example.com", &format!("{url}/api/queue")]);
+    let foreign_write = code(&[
+        "-X",
+        "POST",
+        "-H",
+        "Host: evil.example.com",
+        "-H",
+        "content-type: application/json",
+        "-d",
+        r#"{"id":"one","action":"pin"}"#,
+        &format!("{url}/api/context"),
+    ]);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(ours, "200");
+    assert_eq!(foreign, "403", "a foreign Host must be refused");
+    assert_eq!(foreign_write, "403", "a foreign Host must not mutate state");
+    assert_eq!(a.show("one")["pinned"], false);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_slow_ranker_does_not_freeze_the_rest_of_the_web_view() {
+    use std::os::unix::fs::PermissionsExt;
+    let a = App::new();
+    a.run(&["track", "one", "--command", "cargo test"]);
+    let started = a.root.join("ranker-started");
+    let ranker = a.root.join("slow-ranker.sh");
+    fs::write(
+        &ranker,
+        r#"#!/bin/sh
+cat > /dev/null
+touch "$STEWSH_TEST_STARTED"
+sleep 5
+printf '{"ranking":[]}'
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&ranker, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = {
+        use std::io::{BufRead, BufReader};
+        let mut c = a
+            .command()
+            .args(["serve", "--port", "0", "--no-open"])
+            .env("STEWSH_RANKER", &ranker)
+            .env("STEWSH_TEST_STARTED", &started)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(c.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let url = line
+            .split_whitespace()
+            .find(|w| w.starts_with("http://"))
+            .expect("server prints its URL")
+            .to_string();
+        (c, url)
+    };
+    let (ref mut server, ref url) = child;
+    let mut ranking = Command::new("curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            "-H",
+            "content-type: application/json",
+            "-d",
+            "{}",
+            &format!("{url}/api/rank"),
+        ])
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    // Wait until the ranker subprocess is genuinely running.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !started.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let saw_start = started.exists();
+    // The lock must be free while the ranker thinks, so this returns promptly
+    // rather than waiting out the five-second subprocess.
+    let queue = Command::new("curl")
+        .args(["-s", "--max-time", "3", &format!("{url}/api/queue")])
+        .output()
+        .unwrap();
+    let _ = ranking.wait();
+    let _ = server.kill();
+    let _ = server.wait();
+    assert!(saw_start, "the stub ranker never ran");
+    assert!(
+        queue.status.success(),
+        "the queue blocked behind the ranker subprocess"
+    );
+    let v: Value = serde_json::from_slice(&queue.stdout).unwrap();
+    assert_eq!(v["ok"], true);
+}

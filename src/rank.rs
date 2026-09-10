@@ -214,13 +214,14 @@ fn apply(conn: &Connection, streams: &[Stream], ranking: &[Value], now: i64) -> 
     Ok(ordered)
 }
 
-pub fn run(
-    conn: &mut Connection,
+/// Phase one: decide whether a model call is needed at all. Cheap, and the
+/// only phase before the subprocess that touches the database.
+pub fn cached(
+    conn: &Connection,
     streams: &[Stream],
-    now: i64,
     intent: Option<&str>,
     force: bool,
-) -> Result<Value> {
+) -> Result<Option<Value>> {
     let hash = fingerprint(streams, intent);
     let last: Option<(i64, String, String)> = conn
         .query_row(
@@ -229,46 +230,93 @@ pub fn run(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .ok();
-    if let Some((at, prior, payload)) = &last {
-        if *prior == hash && !force {
-            return Ok(json!({
-                "ranking": serde_json::from_str::<Value>(payload).unwrap_or(Value::Null),
-                "ranked_at": at, "cached": true,
-                "message": "Nothing changed since the last ranking; no model call made."
-            }));
-        }
+    match last {
+        Some((at, prior, payload)) if prior == hash && !force => Ok(Some(json!({
+            "ranking": serde_json::from_str::<Value>(&payload).unwrap_or(Value::Null),
+            "ranked_at": at, "cached": true,
+            "message": "Nothing changed since the last ranking; no model call made."
+        }))),
+        _ => Ok(None),
     }
+}
+
+pub fn ranker_command() -> String {
+    std::env::var("STEWSH_RANKER").unwrap_or_else(|_| DEFAULT_RANKER.to_string())
+}
+
+/// What the ranker said, and which ranker said it.
+pub struct Answer {
+    pub ranking: Vec<Value>,
+    pub fallback: Option<String>,
+    pub note: String,
+    pub command: String,
+}
+
+/// Phase two: the subprocess. Deliberately takes no database handle, so a slow
+/// or hung ranker cannot freeze every other request behind the lock.
+pub fn ask(streams: &[Stream], now: i64, intent: Option<&str>, command: &str) -> Answer {
     let previous: Vec<String> = {
         let mut p: Vec<&Stream> = streams.iter().filter(|s| s.ordinal.is_some()).collect();
         p.sort_by_key(|s| s.ordinal);
         p.iter().map(|s| s.key.clone()).collect()
     };
     let doc = evidence(streams, now, intent, &previous);
-    let command = std::env::var("STEWSH_RANKER").unwrap_or_else(|_| DEFAULT_RANKER.to_string());
     let prompt = format!("{INSTRUCTIONS}\n\n{doc}\n");
-    let (ranking, fallback, note) = match invoke(&command, &prompt).and_then(|t| extract(&t)) {
-        Ok(v) => (
-            v["ranking"].as_array().cloned().unwrap_or_default(),
-            None,
-            v["note"].as_str().unwrap_or("").to_string(),
-        ),
-        Err(e) => (vec![], Some(e.to_string()), String::new()),
-    };
+    let command = command.to_string();
+    match invoke(&command, &prompt).and_then(|t| extract(&t)) {
+        Ok(v) => Answer {
+            ranking: v["ranking"].as_array().cloned().unwrap_or_default(),
+            fallback: None,
+            note: v["note"].as_str().unwrap_or("").to_string(),
+            command,
+        },
+        Err(e) => Answer {
+            ranking: vec![],
+            fallback: Some(e.to_string()),
+            note: String::new(),
+            command,
+        },
+    }
+}
+
+/// Phase three: persist the ordering.
+pub fn commit(
+    conn: &mut Connection,
+    streams: &[Stream],
+    intent: Option<&str>,
+    answer: Answer,
+    now: i64,
+) -> Result<Value> {
+    let hash = fingerprint(streams, intent);
     let tx = conn.transaction()?;
-    let ordered = apply(&tx, streams, &ranking, now)?;
+    let ordered = apply(&tx, streams, &answer.ranking, now)?;
     tx.execute(
         "INSERT INTO rankings(at,input_hash,model,fallback,payload) VALUES(?1,?2,?3,?4,?5)",
         params![
             now,
             hash,
-            command,
-            fallback.is_some(),
+            answer.command,
+            answer.fallback.is_some(),
             serde_json::to_string(&ordered)?
         ],
     )?;
     tx.commit()?;
     Ok(json!({
         "ranking": ordered, "ranked_at": now, "cached": false,
-        "model": command, "note": note, "fallback": fallback,
+        "model": answer.command, "note": answer.note, "fallback": answer.fallback,
     }))
+}
+
+pub fn run(
+    conn: &mut Connection,
+    streams: &[Stream],
+    now: i64,
+    intent: Option<&str>,
+    force: bool,
+) -> Result<Value> {
+    if let Some(hit) = cached(conn, streams, intent, force)? {
+        return Ok(hit);
+    }
+    let answer = ask(streams, now, intent, &ranker_command());
+    commit(conn, streams, intent, answer, now)
 }

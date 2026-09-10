@@ -33,8 +33,12 @@ fn tail(path: &Path) -> Option<Vec<Value>> {
     let len = file.metadata().ok()?.len();
     let from = len.saturating_sub(TAIL_BYTES);
     file.seek(SeekFrom::Start(from)).ok()?;
-    let mut buf = String::new();
-    file.take(TAIL_BYTES + 4096).read_to_string(&mut buf).ok();
+    // Seeking into the file lands mid-character sooner or later, and a strict
+    // UTF-8 read would fail, empty the buffer, and silently drop a live
+    // session. Bytes in, lossy out.
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let buf = String::from_utf8_lossy(&bytes);
     let mut lines: Vec<&str> = buf.lines().collect();
     // A mid-record first line is expected whenever we seeked into the file.
     if from > 0 && !lines.is_empty() {

@@ -9,8 +9,9 @@ use crate::{
     Result,
 };
 use axum::{
-    extract::{Query, State},
+    extract::{Query, Request, State},
     http::{header, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -46,6 +47,12 @@ fn ok(value: Value) -> Response {
     Json(json!({"schema_version":1,"ok":true,"data":value})).into_response()
 }
 
+fn lock(app: &App) -> std::sync::MutexGuard<'_, Connection> {
+    // A panicking handler must not take the whole queue down with it; the
+    // connection itself is still usable.
+    app.db.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
 /// Every handler's work is synchronous SQLite plus short subprocesses, so it
 /// runs on a blocking thread rather than tying up the async runtime.
 async fn blocking<F>(app: App, f: F) -> Response
@@ -55,10 +62,7 @@ where
     // The error type is not Send, so it becomes a message before it crosses
     // the thread boundary.
     let handle = tokio::task::spawn_blocking(move || {
-        let mut guard = match app.db.lock() {
-            Ok(g) => g,
-            Err(poison) => poison.into_inner(),
-        };
+        let mut guard = lock(&app);
         let mut git = Git::new(app.with_pr);
         f(&mut guard, &mut git).map_err(|e| e.to_string())
     })
@@ -162,16 +166,39 @@ struct RankBody {
     force: bool,
 }
 
+/// Three phases, and the database lock is held for only the first and third.
+/// Holding it across a ranker that may take two minutes would freeze the page.
 async fn rank_route(State(app): State<App>, Json(body): Json<RankBody>) -> Response {
-    blocking(app, move |conn, git| {
+    let handle = tokio::task::spawn_blocking(move || {
         let t = now();
-        let streams = stream::assemble(conn, git, t, Mode::Active, false)?;
-        if streams.is_empty() {
-            return Ok(json!({"ranking": [], "message": "Nothing in the queue to rank."}));
+        let intent = body.intent.as_deref();
+        let (streams, early) = {
+            let mut guard = lock(&app);
+            let mut git = Git::new(app.with_pr);
+            let streams = stream::assemble(&mut guard, &mut git, t, Mode::Active, false)
+                .map_err(|e| e.to_string())?;
+            if streams.is_empty() {
+                let done = json!({"ranking": [], "message": "Nothing in the queue to rank."});
+                (streams, Some(done))
+            } else {
+                let hit = rank::cached(&guard, &streams, intent, body.force)
+                    .map_err(|e| e.to_string())?;
+                (streams, hit)
+            }
+        };
+        if let Some(done) = early {
+            return Ok(done);
         }
-        rank::run(conn, &streams, t, body.intent.as_deref(), body.force)
+        let answer = rank::ask(&streams, t, intent, &rank::ranker_command());
+        let mut guard = lock(&app);
+        rank::commit(&mut guard, &streams, intent, answer, t).map_err(|e| e.to_string())
     })
-    .await
+    .await;
+    match handle {
+        Ok(Ok(value)) => ok(value),
+        Ok(Err(message)) => fail(message),
+        Err(e) => fail(format!("worker failed: {e}")),
+    }
 }
 
 #[derive(Deserialize)]
@@ -243,7 +270,41 @@ async fn group(State(app): State<App>, Json(body): Json<GroupBody>) -> Response 
     .await
 }
 
-pub fn router(db: Arc<Mutex<Connection>>, with_pr: bool) -> Router {
+fn is_loopback_host(host: &str, port: u16) -> bool {
+    let (name, given) = match host.rsplit_once(':') {
+        // An IPv6 literal keeps its brackets; a bare one has no port.
+        Some((n, p)) if !n.ends_with('[') && n.contains('[') == n.contains(']') => (n, Some(p)),
+        _ => (host, None),
+    };
+    let named = matches!(name, "127.0.0.1" | "localhost" | "[::1]" | "::1");
+    let ported = match given {
+        Some(p) => p.parse::<u16>() == Ok(port),
+        None => false,
+    };
+    named && ported
+}
+
+/// A browser that has been rebound to 127.0.0.1 still sends the attacker's
+/// hostname in `Host`, so checking it is what actually closes DNS rebinding.
+async fn loopback_only(State(port): State<u16>, req: Request, next: Next) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    if !is_loopback_host(&host, port) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"schema_version":1,"ok":false,"error":{
+                "message":"StewardShell answers only to its own loopback address"}})),
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+pub fn router(db: Arc<Mutex<Connection>>, with_pr: bool, port: u16) -> Router {
     let app = App { db, with_pr };
     Router::new()
         .route("/", get(index))
@@ -256,6 +317,7 @@ pub fn router(db: Arc<Mutex<Connection>>, with_pr: bool) -> Router {
         .route("/api/stream", post(stream_action))
         .route("/api/group", post(group))
         .with_state(app)
+        .layer(middleware::from_fn_with_state(port, loopback_only))
 }
 
 pub fn start(conn: Connection, port: u16, with_pr: bool, open_browser: bool) -> Result<()> {
@@ -274,9 +336,12 @@ pub fn start(conn: Connection, port: u16, with_pr: bool, open_browser: bool) -> 
         if open_browser {
             let _ = std::process::Command::new("open").arg(&url).status();
         }
-        axum::serve(listener, router(Arc::new(Mutex::new(conn)), with_pr))
-            .await
-            .map_err(|e| format!("server stopped: {e}"))?;
+        axum::serve(
+            listener,
+            router(Arc::new(Mutex::new(conn)), with_pr, bound.port()),
+        )
+        .await
+        .map_err(|e| format!("server stopped: {e}"))?;
         Ok::<(), Box<dyn std::error::Error>>(())
     })
 }

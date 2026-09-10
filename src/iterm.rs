@@ -195,16 +195,18 @@ pub fn sync(conn: &mut Connection, now: i64) -> Result<Value> {
             })
             .map(|(_, a)| *a)
             .max();
-        let from_screen = old_state_source == "screen" || old_state == "unknown";
-        let state = if from_screen {
-            signal(&pane.text, pane.prompt)
+        // Screen evidence is weak, but a pane visibly asking a question or
+        // showing a failure is worth more than a stale shell state. The zsh
+        // hook marks a pane `working` on every command, so without this an
+        // agent's prompt would never surface in the very setup we recommend.
+        // Only an explicit agent report keeps its veto.
+        let observed = signal(&pane.text, pane.prompt);
+        let weak = old_state_source == "screen" || old_state == "unknown";
+        let overrides = old_state_source != "agent" && matches!(observed, "waiting" | "failed");
+        let (state, state_source) = if weak || overrides {
+            (observed, "screen")
         } else {
-            &old_state
-        };
-        let state_source = if from_screen {
-            "screen"
-        } else {
-            &old_state_source
+            (old_state.as_str(), old_state_source.as_str())
         };
         // A changed screen is activity, not a new revision: a spinner, a clock
         // or a log tail would otherwise un-review the pane on every sync and
