@@ -10,6 +10,21 @@ pub const HALF_LIFE_SECS: f64 = 5400.0;
 /// Beyond this the decayed contribution is below one part in 65,000.
 pub const HEAT_WINDOW_SECS: i64 = 86_400;
 
+/// Reason codes that mean a stream is *asking the human for something*, as
+/// opposed to merely being unfinished. `dirty` and `ahead` are debt, not a
+/// request: an uncommitted tree is work in progress, not a question. The order
+/// here is the order the agent surface reports them in.
+pub const REQUEST_CODES: [&str; 8] = [
+    "stream_pinned",
+    "pinned",
+    "waiting",
+    "failed",
+    "pr_failing",
+    "ready",
+    "next_action",
+    "older",
+];
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Context {
     pub id: String,
@@ -227,6 +242,22 @@ impl Stream {
         }
         self.score = self.heat_points + self.debt + i32::from(self.pinned) * 100 + git_points;
         self.debt += git_points;
+    }
+
+    /// Which `REQUEST_CODES` this stream currently earns, stream-level and
+    /// member-level together. Reading them off `reasons` rather than
+    /// recomputing keeps one policy: change a score and this follows.
+    pub fn requests(&self, now: i64) -> Vec<&'static str> {
+        let live = self
+            .members
+            .iter()
+            .filter(|m| m.kind != "tab" && m.queued(now))
+            .flat_map(|m| m.reasons.iter());
+        let earned: Vec<&str> = self.reasons.iter().chain(live).map(|r| r.code).collect();
+        REQUEST_CODES
+            .into_iter()
+            .filter(|c| earned.contains(c))
+            .collect()
     }
 
     pub fn queued(&self, now: i64) -> bool {

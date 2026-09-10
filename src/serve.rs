@@ -1,7 +1,9 @@
 //! Local web view. One binary, one page, no build step: the display is a
 //! ranked list, which HTML has done well for thirty years.
 use crate::{
-    actions, iterm,
+    actions,
+    agent::{self, Budget, DEFAULT_BUDGET_TOKENS},
+    iterm,
     model::clean,
     rank,
     repo::Git,
@@ -100,6 +102,35 @@ async fn queue(State(app): State<App>, Query(q): Query<HashMap<String, String>>)
         // CLI rejects, sort by Active anyway, and echo the bogus name back.
         let streams = stream::assemble(conn, git, t, crate::mode_of(&name)?, all)?;
         Ok(json!({"streams": streams, "as_of": t, "mode": name}))
+    })
+    .await
+}
+
+/// The agent-facing reads, over loopback, for an agent that can reach a URL
+/// but not spawn a subprocess. Same builders the CLI and the MCP server call.
+async fn brief(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let name = q.get("mode").cloned().unwrap_or_else(|| "ranked".into());
+    let all = q.get("all").is_some_and(|v| v == "1" || v == "true");
+    let tokens = q
+        .get("budget")
+        .and_then(|v| v.parse::<usize>().ok())
+        .map_or(DEFAULT_BUDGET_TOKENS, |n| n.clamp(200, 20_000));
+    let session = q.get("session_id").cloned();
+    blocking(app, move |conn, git| {
+        let budget = Budget {
+            mode: crate::mode_of(&name)?,
+            all,
+            tokens,
+        };
+        agent::brief(conn, git, session.as_deref(), &budget, now())
+    })
+    .await
+}
+
+async fn whoami(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let session = q.get("session_id").cloned();
+    blocking(app, move |conn, git| {
+        agent::whoami(conn, git, session.as_deref(), now())
     })
     .await
 }
@@ -303,6 +334,8 @@ pub fn router(db: Arc<Mutex<Connection>>, with_pr: bool, port: u16) -> Router {
         .route("/", get(index))
         .route("/alpine.js", get(alpine))
         .route("/api/queue", get(queue))
+        .route("/api/brief", get(brief))
+        .route("/api/whoami", get(whoami))
         .route("/api/sync", post(sync))
         .route("/api/rank", post(rank_route))
         .route("/api/focus", post(focus))

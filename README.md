@@ -26,7 +26,8 @@ stewsh             # open the web view
 
 `stewsh` with no arguments opens the local web view at `http://127.0.0.1:7777`.
 With piped input or `--json` it prints the queue instead. `stewsh shell` still
-gives the line-oriented prompt for scripting. This checkout is version **0.3.0**.
+gives the line-oriented prompt for scripting, and `stewsh mcp` serves the
+[agent interface](#the-agent-interface). This checkout is version **0.3.0**.
 No login-shell change, background service, or cloud account is needed.
 
 ## The web view
@@ -203,9 +204,65 @@ records the jump as activity, because choosing to go somewhere is the clearest
 statement of intent there is. Streams whose only members are agent sessions with
 no terminal report where the work lives instead.
 
+## The agent interface
+
+The `--json` contract below is the human's view, made machine-readable. An agent
+asks a different question, so it gets a different surface over the same store,
+the same scoring and the same action layer.
+
+```sh
+stewsh whoami                  # which context and stream am I, and how do you know
+stewsh brief                   # the queue, shrunk to a token budget
+stewsh stream show repo#branch # one stream in full, with merged event history
+stewsh mcp                     # speak the Model Context Protocol on stdio
+```
+
+**Identity has a ladder, and it says which rung it used.** An explicit
+`--session-id`, then `STEWSH_SESSION_ID`, then iTerm's session environment, then
+the working directory. `via` reports the rung. A shell hook's session ID is
+authoritative for that shell before its first write, so a declared identity with
+no row yet is still writable. When two sessions share a directory the tie is
+**reported, never broken** — an agent gets `ambiguous` and a hint to pass its own
+ID, rather than filing a handoff into a sibling's context.
+
+**`needs_human` is the verdict, `requests` is the evidence.** Scores answer
+"how much", not "is this a question". A stream asks for a person when it earns
+one of the request codes — `waiting`, `failed`, `ready`, `next_action`,
+`pr_failing`, `older`, `pinned`. Uncommitted changes and unpushed commits are
+deliberately not among them: that is unfinished work, not a question. The codes
+are read off the same reasons the points table produces, so there is one policy.
+
+**The brief has a budget, spends it, and admits what it cost.** `--budget N`
+caps the reply at roughly N tokens, estimated at four bytes each. Breadth comes
+first: every stream keeps its row, and per-stream detail — members, then prose
+width — is thinned to pay for it, because knowing which streams want a person
+beats knowing five of them deeply, and depth on one stream is a
+`stewsh stream show` away. Only when even the barest listing will not fit are
+streams dropped, least urgent first. `omitted` and `estimated_tokens` report
+what fitting cost, and `over_budget` says so when nothing fit.
+
+### As an MCP server
+
+```sh
+claude mcp add stewsh -- stewsh mcp
+```
+
+Five tools: `stewsh_whoami`, `stewsh_brief`, `stewsh_stream`, `stewsh_capture`,
+`stewsh_report`. Each result carries both text and `structuredContent`, so a
+client need not re-parse the payload.
+
+What is absent is deliberate. There is **no focus tool**, because an agent must
+not seize your window; **no pin, snooze or resolve**, because triage is your
+judgement; and **no rank**, because ranking spends your model budget and belongs
+to the key you press. An agent may describe and report. It does not decide.
+
+`stewsh_report` and `stewsh_capture` are the write paths, and both are the same
+functions the CLI calls. `event_id` makes a retried report idempotent, which
+matters because an agent that fails mid-turn will send it again.
+
 ## Agent-friendly contract
 
-Every command except the interactive `serve` and `shell` takes `--json`:
+Every command except the interactive `serve`, `shell` and `mcp` takes `--json`:
 
 ```sh
 stewsh queue --json --mode active
@@ -219,15 +276,16 @@ Exit code 2 is invalid syntax, 1 is an operational error. Scoring reasons are
 structured objects with `points`, a stable `code`, and human text, so an agent
 does not parse prose. Timestamps are Unix seconds and IDs are complete.
 
-`capture` and `report` resolve identity from `STEWSH_SESSION_ID`, then iTerm's
-session environment, then `--session-id`. Those two commands match IDs
+`capture` and `report` resolve identity the way the
+[agent interface](#the-agent-interface) does: `--session-id`, then
+`STEWSH_SESSION_ID`, then iTerm's session environment. Those two commands match IDs
 **exactly**: an agent reporting a fresh ID gets its own context rather than
 silently adopting one that happens to share a prefix. Commands you type by hand
 still accept unique prefixes and still refuse ambiguous ones.
 
-The web view speaks the same contract over `GET /api/queue`, `POST /api/rank`,
-`/api/sync`, `/api/focus`, `/api/context`, `/api/stream` and `/api/group`. It
-serves loopback only and refuses any request whose `Host` is not its own
+The web view speaks the same contract over `GET /api/queue`, `/api/brief`,
+`/api/whoami`, `POST /api/rank`, `/api/sync`, `/api/focus`, `/api/context`,
+`/api/stream` and `/api/group`. It serves loopback only and refuses any request whose `Host` is not its own
 address, which is what closes DNS rebinding; the JSON content type already
 blocks ordinary cross-site form posts.
 
@@ -256,7 +314,9 @@ and agent transcripts are read but never written to the database.
 
 Two things leave the machine, both off by default and both explicit:
 `--pr` shells out to `gh` for pull request check status, and `rank` sends the
-evidence document to whatever `STEWSH_RANKER` names. The evidence document
+evidence document to whatever `STEWSH_RANKER` names. A third is worth naming
+even though it stays local: `stewsh mcp` hands briefs to whichever agent you
+connected it to, and that agent may have a model behind it. The evidence document
 contains session titles, branch names, paths, notes and handoff text. Run
 `stewsh rank --dry-run` to see exactly what would be sent. With a local model as
 the ranker, nothing leaves at all.
@@ -296,8 +356,10 @@ prevents it.
 
 Tests cover migration, heat decay against undecayed debt, stream grouping with
 manual override, ranker failure and caching, the evidence document, transcript
-reading, exact-versus-prefix identity, the web endpoints over loopback, iTerm
-snapshots, and the zsh hooks.
+reading, exact-versus-prefix identity, the identity ladder and its refusal to
+break a tie, the brief's budget, the request-code verdict, the MCP handshake and
+its tool calls, the web endpoints over loopback, iTerm snapshots, and the zsh
+hooks.
 
 Not built, deliberately: an adapter for arbitrary application windows. It needs
 macOS Accessibility, and when that permission is absent the API returns an empty
@@ -305,6 +367,5 @@ list rather than an error, so a silent no-op is the failure mode. That is the
 worst kind to ship, and it needs a permission check that can tell "nothing open"
 from "not allowed" before it is worth having.
 
-Next: that window adapter, lifecycle hooks for harnesses that offer them, tmux
-and fish adapters, and an MCP surface so an agent already in a session can read
-the queue and report into it. MIT licensed.
+Next: that window adapter, lifecycle hooks for harnesses that offer them, and
+tmux and fish adapters. MIT licensed.

@@ -122,8 +122,45 @@ unidentified.
 One binary, one SQLite store, no daemon. The web view is served from the binary
 on loopback and is the primary surface; the line-oriented prompt remains for
 scripting; every command takes `--json` with a versioned envelope, structured
-scoring reasons, complete IDs and clean stdout. The web view calls the same
-action layer the CLI does, so the two surfaces cannot drift.
+scoring reasons, complete IDs and clean stdout. All three surfaces call the same
+action layer, so none of them can drift from the others.
+
+## The agent surface is a different question, not a different format
+
+`--json` is the human's view serialized: the whole desk, every field, and no way
+to ask the question an agent actually has. Four things differ, and each is a
+design decision rather than a formatting one.
+
+**Perspective.** The human asks what deserves attention. An agent asks where it
+is, what the last session left it, and who else is in the same stream. So
+identity is a first-class read with a ladder that reports which rung it used —
+explicit ID, shell session, iTerm session, working directory. A tie between two
+sessions in one directory is reported and never broken, which is the same rule
+`report` already applies to ID prefixes: guessing wrong writes a handoff into
+someone else's work.
+
+**Verdict over score.** Heat and debt answer "how much", not "is this asking for
+a person". `needs_human` and its `requests` codes answer that, derived from the
+reasons the scoring already produced, so there is one policy and no second
+points table to keep in step. Dirty trees and unpushed commits are excluded on
+purpose: unfinished is not the same as blocked.
+
+**A budget it admits to.** Every field an agent reads is a field it pays for.
+The brief takes a token ceiling and spends it breadth-first: every stream keeps
+its row and per-stream detail pays for that, because the value of a brief is
+knowing which streams want a person, and depth on any one of them is a second
+call away. It reports what fitting cost. A payload that silently truncated would
+be worse than one that refused.
+
+**Discovery.** A human reads `--help`; an agent cannot. MCP carries tool schemas
+and server instructions into the model's context, which is why it is the primary
+agent transport, hand-rolled over stdio JSON-RPC for the same reason SQLite is
+bundled and Alpine is vendored.
+
+The surface is deliberately narrow on writes. An agent may describe and report:
+there is no focus tool, because it must not seize the human's window; no pin,
+snooze or resolve, because triage is the human's judgement; and no rank, because
+ranking spends the human's model budget and belongs to the key they press.
 
 Two things leave the machine, both explicit and both off by default: `--pr`
 shells out to `gh`, and `rank` sends the evidence document to the configured
@@ -159,8 +196,7 @@ than an error. Shipping a silent no-op is worse than not shipping, so this waits
 on a permission probe that distinguishes "nothing open" from "not allowed".
 
 **Then.** Lifecycle hooks for harnesses that offer them, promoting inference to
-ground truth. tmux, Bash and fish adapters. An MCP surface so an agent already in
-a session can read the queue and report into it.
+ground truth. tmux, Bash and fish adapters.
 
 **Later.** Ranking hysteresis if stored ordinals prove insufficient in daily use;
 undo; lightweight task-manager export.
@@ -175,7 +211,9 @@ shell intact.
 
 Automated tests cover migration without data loss, heat decay against undecayed
 debt, stream grouping with manual override, ranker failure and caching, the
-evidence document, transcript reading, exact-versus-prefix identity, closed-pane
-handling, safe preview rendering, the web endpoints over loopback, and hook
-behavior. Tests drive real CLI subprocesses, a scripted interactive session, and
-a live server.
+evidence document, transcript reading, exact-versus-prefix identity, the
+identity ladder's refusal to break a tie, the brief's budget, the request-code
+verdict, the MCP handshake and its tool calls, closed-pane handling, safe
+preview rendering, the web endpoints over loopback, and hook behavior. Tests
+drive real CLI subprocesses, a scripted interactive session, a live server, and
+a live MCP session over stdio.

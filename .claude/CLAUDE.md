@@ -13,8 +13,10 @@ those two have no reason to carry.
 | File | Owns |
 | --- | --- |
 | `main.rs` | clap surface, dispatch, text rendering, exit codes |
-| `actions.rs` | the shared action layer both surfaces call |
+| `actions.rs` | the shared action layer all three surfaces call |
 | `serve.rs` | axum web view on loopback, `/api/*` |
+| `agent.rs` | the agent-facing views: identity ladder, brief, stream detail |
+| `mcp.rs` | Model Context Protocol over stdio JSON-RPC |
 | `model.rs` | `Context`, `Stream`, heat decay, debt scoring |
 | `stream.rs` | grouping, regrouping, assembly, mode ordering |
 | `store.rs` | schema, migrations, rows, events |
@@ -28,9 +30,23 @@ those two have no reason to carry.
 
 ## Invariants
 
-**Both surfaces go through `actions.rs`.** A CLI command and its web endpoint
-must call the same function. Adding behavior in `main.rs` or `serve.rs` alone is
-how the two drift, which is the thing that layer exists to prevent.
+**Every surface goes through `actions.rs`.** A CLI command, its web endpoint
+and its MCP tool must call the same function. Adding behavior in `main.rs`,
+`serve.rs` or `mcp.rs` alone is how they drift, which is the thing that layer
+exists to prevent. `agent.rs` is the read-side equivalent: `brief`, `whoami` and
+`detail` are built once and rendered by whoever asked.
+
+**The agent surface describes and reports; it does not decide.** No focus, pin,
+snooze, resolve or rank reaches `mcp.rs`, and a test asserts no tool name
+contains those verbs. Adding one is a product decision, not a plumbing one.
+
+**`REQUEST_CODES` is read, never recomputed.** `Stream::requests` filters the
+reasons scoring already produced, so a points change follows automatically. A
+second policy that decides "is this asking for a human" is the bug this avoids.
+
+**`State` is the one list of activity states.** clap's `ValueEnum`, the MCP
+tool's `enum` and `State::parse` all come from `State::ALL`; a test drives every
+value the MCP schema advertises through the CLI. Do not hand-write a second list.
 
 **Reason codes are stable API.** The `code` on a scoring reason is what an agent
 switches on instead of parsing prose, so renaming one is a breaking change. The

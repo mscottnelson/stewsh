@@ -1,8 +1,9 @@
-//! Actions shared by the CLI and the web view, so both surfaces cannot drift.
+//! Actions shared by the CLI, the web view and the MCP server, so no surface
+//! can drift from the others.
 use crate::{
     browser, iterm,
     model::{slug, Context, Stream},
-    store, stream, Result,
+    store, stream, Result, State,
 };
 use chrono::{Local, TimeZone};
 use rusqlite::{params, Connection};
@@ -242,6 +243,81 @@ pub fn stream_action(
     };
     conn.execute(sql, [&s.id])?;
     Ok(json!({"id": s.id, "action": action}))
+}
+
+/// Save a next action, creating the context when the ID is new. Capture never
+/// marks work complete: it is the note the human or the agent wants to find
+/// next time, and nothing else.
+pub fn capture(
+    conn: &mut Connection,
+    id: &str,
+    note: Option<&str>,
+    cwd: &str,
+    t: i64,
+) -> Result<Value> {
+    let tx = conn.transaction()?;
+    store::ensure(&tx, id, cwd, t)?;
+    tx.commit()?;
+    match note {
+        Some(note) => context_action(conn, id, "capture", Some(note), None, t),
+        None => context_action(conn, id, "clear", None, None, t),
+    }
+}
+
+/// An agent's report on itself. Agent-sourced state outranks anything inferred
+/// from a transcript or a screen, and `event_id` makes a retried report
+/// idempotent, because an agent that failed mid-turn will send it again.
+pub struct Report<'a> {
+    pub state: State,
+    pub agent: Option<&'a str>,
+    pub summary: Option<&'a str>,
+    /// A stable ID for one report, so an agent that retries after failing
+    /// mid-turn is recorded once.
+    pub event_id: Option<&'a str>,
+}
+
+pub fn report(conn: &mut Connection, id: &str, r: &Report, cwd: &str, t: i64) -> Result<Value> {
+    let Report {
+        state,
+        agent,
+        summary,
+        event_id,
+    } = *r;
+    for (value, label) in [
+        (&agent, "agent"),
+        (&summary, "summary"),
+        (&event_id, "event ID"),
+    ] {
+        if let Some(v) = value {
+            validate(v, label)?;
+        }
+    }
+    let tx = conn.transaction()?;
+    store::ensure(&tx, id, cwd, t)?;
+    if let Some(key) = event_id {
+        if tx.execute(
+            "INSERT OR IGNORE INTO receipts(session_id,external_id) VALUES(?1,?2)",
+            params![id, key],
+        )? == 0
+        {
+            return Ok(json!({"id": id, "duplicate": true, "message": "Report already recorded"}));
+        }
+    }
+    tx.execute(
+        "UPDATE sessions SET state=?2,state_source='agent',agent=COALESCE(?3,agent),
+         handoff=COALESCE(?4,handoff),revision=revision+1,last_active_interaction=?5 WHERE id=?1",
+        params![id, state.label(), agent, summary, t],
+    )?;
+    store::event(
+        &tx,
+        id,
+        t,
+        "reported",
+        json!({"state": state.label(), "agent": agent, "summary": summary}),
+        event_id,
+    )?;
+    tx.commit()?;
+    Ok(json!({"id": id, "state": state.label(), "message": "Agent report recorded"}))
 }
 
 /// Manual grouping. Creates the stream when the name is new, and the membership

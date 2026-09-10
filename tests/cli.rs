@@ -25,7 +25,55 @@ impl App {
     fn command(&self) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_stewsh"));
         c.arg("--db").arg(&self.db);
+        // The suite resolves identity, so the developer's own shell session
+        // must not leak in: inside iTerm, or a stewsh-hooked zsh, these are set.
+        c.env_remove("STEWSH_SESSION_ID")
+            .env_remove("ITERM_SESSION_ID");
         c
+    }
+    /// Run from a chosen directory, because the working directory is itself an
+    /// input to identity and grouping.
+    fn run_in(&self, dir: &std::path::Path, args: &[&str]) -> Value {
+        let out = self
+            .command()
+            .current_dir(dir)
+            .arg("--json")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{:?}: {} {}",
+            args,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(envelope["ok"], true);
+        envelope["data"].clone()
+    }
+    /// One MCP session: every request in, stdin closed, every reply back. The
+    /// server exits when stdin ends, so this needs no timeout.
+    fn mcp(&self, requests: &[&str]) -> Vec<Value> {
+        let mut child = self
+            .command()
+            .current_dir(&self.root)
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            let mut stdin = child.stdin.take().unwrap();
+            for request in requests {
+                writeln!(stdin, "{request}").unwrap();
+            }
+        }
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
     }
     fn run(&self, args: &[&str]) -> Value {
         let out = self.command().arg("--json").args(args).output().unwrap();
@@ -555,12 +603,28 @@ fn web_view_serves_the_queue_over_loopback() {
         .args(["-sf", &format!("{url}/api/queue")])
         .output()
         .unwrap();
+    // The agent-facing reads are on the same server, from the same builders.
+    let brief = Command::new("curl")
+        .args(["-sf", &format!("{url}/api/brief?mode=debt&budget=900")])
+        .output()
+        .unwrap();
+    let whoami = Command::new("curl")
+        .args(["-sf", &format!("{url}/api/whoami?session_id=one")])
+        .output()
+        .unwrap();
     let _ = child.kill();
     let _ = child.wait();
     assert!(String::from_utf8_lossy(&page.stdout).contains("StewardShell"));
     let v: Value = serde_json::from_slice(&queue.stdout).unwrap();
     assert_eq!(v["ok"], true);
     assert_eq!(v["data"]["streams"][0]["members"][0]["id"], "one");
+    let v: Value = serde_json::from_slice(&brief.stdout).unwrap();
+    assert_eq!(v["data"]["mode"], "debt");
+    assert_eq!(v["data"]["budget_tokens"], 900);
+    assert_eq!(v["data"]["queue"][0]["members"][0]["id"], "one");
+    let v: Value = serde_json::from_slice(&whoami.stdout).unwrap();
+    assert_eq!(v["data"]["via"], "argument");
+    assert_eq!(v["data"]["context"]["id"], "one");
 }
 
 #[cfg(target_os = "macos")]
@@ -1196,4 +1260,268 @@ fn an_unreadable_browser_never_deletes_the_tabs_it_cannot_see() {
     )
     .unwrap();
     assert!(!tabs().status.success());
+}
+
+/// `stewsh_whoami` is the primitive the human surface never needed: an agent
+/// asking where it is. The ladder must say how it resolved, and must refuse to
+/// break a tie rather than file a handoff into a sibling's context.
+#[test]
+fn whoami_says_how_it_resolved_and_refuses_to_guess_between_siblings() {
+    let a = App::new();
+    let work = a.root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    a.run_in(&work, &["track", "pane-one"]);
+
+    // One recorded session in this directory is enough to name the context.
+    let me = a.run_in(&work, &["whoami"]);
+    assert_eq!(me["via"], "cwd");
+    assert_eq!(me["context"]["id"], "pane-one");
+    assert!(me["hint"].is_null(), "a resolved identity needs no hint");
+
+    // Two is not: the tie is reported, never broken.
+    a.run_in(&work, &["track", "pane-two"]);
+    let me = a.run_in(&work, &["whoami"]);
+    assert!(me["context"].is_null());
+    assert_eq!(me["ambiguous"].as_array().unwrap().len(), 2);
+    assert!(me["hint"].as_str().unwrap().contains("pass session_id"));
+    // The stream is still resolvable from the directory even when the context
+    // is not, which is the common case for an agent harness.
+    assert!(me["stream"]["stream"].as_str().unwrap().contains("work"));
+
+    // An explicit ID outranks everything and names its siblings.
+    let me = a.run_in(&work, &["whoami", "--session-id", "pane-two"]);
+    assert_eq!(me["via"], "argument");
+    assert_eq!(me["context"]["id"], "pane-two");
+    assert_eq!(me["siblings"][0]["id"], "pane-one");
+
+    // A shell hook's session ID is authoritative before its first write, so a
+    // declared-but-unrecorded identity is still writable, not an error.
+    let out = a
+        .command()
+        .current_dir(&work)
+        .arg("--json")
+        .args(["whoami"])
+        .env("STEWSH_SESSION_ID", "brand-new")
+        .output()
+        .unwrap();
+    let me: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let me = &me["data"];
+    assert_eq!(me["via"], "stewsh_session_id");
+    assert_eq!(me["declared"], "brand-new");
+    assert!(me["context"].is_null());
+    assert!(me["hint"].is_null());
+}
+
+/// The brief is the one payload with a budget, because an agent pays for every
+/// field it reads. It must fit, and it must say what fitting cost.
+#[test]
+fn a_brief_fits_its_budget_and_names_what_it_dropped() {
+    let a = App::new();
+    let note = "Read the migration, decide whether the backfill runs before or \
+                after the cutover, then tell the other session which it is.";
+    for i in 0..14 {
+        let id = format!("ctx-{i}");
+        a.run(&["track", &id]);
+        a.run(&["capture", note, "--session-id", &id]);
+    }
+    // Distinct directories make distinct streams; nothing has assembled yet, so
+    // the first brief's self-healing regroup files them by these values.
+    a.sql("UPDATE sessions SET cwd='/tmp/stewsh-work-'||id");
+
+    let full = a.run(&["brief", "--mode", "debt", "--budget", "20000"]);
+    assert_eq!(full["counts"]["streams"], 14);
+    assert_eq!(full["omitted"]["streams"], 0);
+    assert_eq!(full["queue"].as_array().unwrap().len(), 14);
+
+    // Breadth is paid for out of detail: every stream keeps its row while the
+    // member rosters go, and only a budget too small for the bare listing
+    // starts dropping streams.
+    let thinned = a.run(&["brief", "--mode", "debt", "--budget", "1200"]);
+    assert_eq!(thinned["omitted"]["streams"], 0);
+    assert_eq!(thinned["queue"].as_array().unwrap().len(), 14);
+    assert!(thinned["omitted"]["members"].as_u64().unwrap() > 0);
+    assert!(thinned["estimated_tokens"].as_u64().unwrap() <= 1200);
+    assert!(
+        thinned["estimated_tokens"].as_u64().unwrap()
+            > full["estimated_tokens"].as_u64().unwrap() / 4,
+        "a budget should be spent, not merely respected"
+    );
+
+    let small = a.run(&["brief", "--mode", "debt", "--budget", "400"]);
+    let tokens = small["estimated_tokens"].as_u64().unwrap();
+    assert!(tokens <= 400, "brief overran its budget at {tokens} tokens");
+    assert!(small["omitted"]["streams"].as_u64().unwrap() > 0);
+    // Still an answer, not a truncated one: the count is of the whole desk.
+    assert_eq!(small["counts"]["streams"], 14);
+    assert!(small["queue"].as_array().unwrap().len() < 14);
+    // Shrinking drops detail in a stated order, never the leading stream.
+    assert_eq!(small["queue"][0]["n"], 1);
+    assert_eq!(small["queue"][0]["stream"], full["queue"][0]["stream"]);
+}
+
+/// The verdict an agent actually wants, and the distinction the scores alone
+/// cannot express: a dirty tree is unfinished, not a question.
+#[test]
+fn the_agent_surface_separates_asking_for_a_human_from_merely_unfinished() {
+    let a = App::new();
+    a.run(&["track", "quiet"]);
+    a.run(&["track", "broken", "--exit-code", "1"]);
+    a.sql("UPDATE sessions SET cwd='/tmp/stewsh-'||id");
+    let of = |brief: &Value, key: &str| -> Value {
+        brief["queue"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["stream"] == key)
+            .cloned()
+            .unwrap_or_else(|| panic!("no stream {key}"))
+    };
+
+    let brief = a.run(&["brief", "--mode", "debt"]);
+    assert_eq!(brief["counts"]["needs_human"], 1);
+    let broken = of(&brief, "dir:/tmp/stewsh-broken");
+    assert_eq!(broken["needs_human"], true);
+    assert_eq!(broken["requests"][0], "failed");
+    let quiet = of(&brief, "dir:/tmp/stewsh-quiet");
+    assert_eq!(quiet["needs_human"], false);
+    assert!(quiet["requests"].is_null(), "no codes means no request");
+
+    // Repo evidence raises debt without turning the stream into a question.
+    a.sql("UPDATE streams SET dirty=1,ahead=3 WHERE key='dir:/tmp/stewsh-quiet'");
+    let brief = a.run(&["brief", "--mode", "debt"]);
+    let quiet = of(&brief, "dir:/tmp/stewsh-quiet");
+    assert_eq!(quiet["needs_human"], false);
+    assert!(quiet["debt"].as_i64().unwrap() > 0);
+    assert_eq!(quiet["git"]["dirty"], true);
+    assert_eq!(quiet["git"]["ahead"], 3);
+
+    // A saved next action is a question; a captured note is the human's own ask.
+    a.run(&[
+        "capture",
+        "Decide the cutover order",
+        "--session-id",
+        "quiet",
+    ]);
+    let brief = a.run(&["brief", "--mode", "debt"]);
+    assert_eq!(of(&brief, "dir:/tmp/stewsh-quiet")["needs_human"], true);
+    assert_eq!(brief["counts"]["needs_human"], 2);
+}
+
+/// The MCP surface is a protocol adapter and nothing more: it must write
+/// through the same action layer the CLI does, and land in the same store.
+#[test]
+fn mcp_speaks_json_rpc_over_stdio_and_writes_through_the_same_actions() {
+    let a = App::new();
+    a.run(&["track", "claude:in-session"]);
+    let replies = a.mcp(&[
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"stewsh_report","arguments":{"state":"waiting","summary":"Need the cutover order","agent":"claude","session_id":"claude:in-session","event_id":"turn-1"}}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"stewsh_report","arguments":{"state":"ready","summary":"Different text, same event","session_id":"claude:in-session","event_id":"turn-1"}}}"#,
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"stewsh_capture","arguments":{"note":"Review the backfill","session_id":"claude:in-session"}}}"#,
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"stewsh_brief","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"stewsh_report","arguments":{"state":"nonsense"}}}"#,
+        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"stewsh_capture","arguments":{"note":"whose context?"}}}"#,
+        r#"{"jsonrpc":"2.0","id":9,"method":"resources/list"}"#,
+        "definitely not json",
+    ]);
+
+    // A notification is acted on and never answered: eleven lines in, and the
+    // nine requests carrying an ID plus the unparseable line make ten replies.
+    assert_eq!(replies.len(), 10, "{replies:#?}");
+    let by_id = |id: i64| -> Value {
+        replies
+            .iter()
+            .find(|r| r["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no reply for {id}"))
+    };
+    let content = |id: i64| -> String {
+        by_id(id)["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    let init = by_id(1);
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(init["result"]["serverInfo"]["name"], "stewsh");
+    assert!(init["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .contains("stewsh_whoami"));
+
+    let listed = by_id(2);
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "stewsh_whoami",
+            "stewsh_brief",
+            "stewsh_stream",
+            "stewsh_capture",
+            "stewsh_report"
+        ]
+    );
+    // Triage stays the human's: no tool may focus, pin, snooze, resolve or rank.
+    for forbidden in ["focus", "pin", "snooze", "resolve", "rank", "review"] {
+        assert!(
+            !names.iter().any(|n| n.contains(forbidden)),
+            "the agent surface must not expose {forbidden}"
+        );
+    }
+
+    assert!(content(3).contains("Agent report recorded"));
+    // Same event ID, different text: recorded once, exactly as the CLI does.
+    assert!(content(4).contains("already recorded"));
+    let s = a.show("claude:in-session");
+    assert_eq!(s["state"], "waiting");
+    assert_eq!(s["state_source"], "agent");
+    assert_eq!(s["handoff"], "Need the cutover order");
+    assert_eq!(s["note"], "Review the backfill");
+
+    // A structured mirror of the text, so a client need not re-parse it.
+    let brief = &by_id(6)["result"]["structuredContent"];
+    assert_eq!(brief["counts"]["needs_human"], 1);
+    assert!(brief["estimated_tokens"].as_u64().unwrap() > 0);
+
+    // A tool failure is readable content, not a dropped connection.
+    assert_eq!(by_id(7)["result"]["isError"], true);
+    assert!(content(7).contains("unknown state"));
+    assert_eq!(by_id(8)["result"]["isError"], true);
+    assert!(content(8).contains("session_id"));
+    // Protocol-level faults stay protocol-level.
+    assert_eq!(by_id(9)["error"]["code"], -32601);
+    assert_eq!(
+        replies.iter().find(|r| r["id"].is_null()).unwrap()["error"]["code"],
+        -32700
+    );
+}
+
+/// The MCP tool's `state` enum and the CLI's accepted values are one list in
+/// the source. This is the gate that keeps them one list in practice.
+#[test]
+fn the_reported_states_are_the_same_list_on_both_surfaces() {
+    let a = App::new();
+    let replies = a.mcp(&[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#]);
+    let tools = replies[0]["result"]["tools"].as_array().unwrap();
+    let report = tools.iter().find(|t| t["name"] == "stewsh_report").unwrap();
+    let states: Vec<String> = report["inputSchema"]["properties"]["state"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(states.len() >= 6, "{states:?}");
+    for state in &states {
+        a.run(&["report", state, "--session-id", "probe"]);
+        assert_eq!(a.show("probe")["state"], state.as_str());
+    }
+    a.fail(&["report", "sideways", "--session-id", "probe"]);
 }

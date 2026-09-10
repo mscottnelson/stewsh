@@ -1,7 +1,9 @@
 mod actions;
+mod agent;
 mod browser;
 mod harness;
 mod iterm;
+mod mcp;
 mod model;
 mod rank;
 mod repo;
@@ -48,8 +50,10 @@ struct Cli {
     command: Option<Commands>,
 }
 
+/// The one list of activity states. `actions` and `mcp` parse against it too,
+/// so the CLI's accepted values and the MCP tool's enum cannot drift apart.
 #[derive(Clone, Copy, Debug, ValueEnum)]
-enum State {
+pub enum State {
     Unknown,
     Idle,
     Working,
@@ -58,7 +62,15 @@ enum State {
     Failed,
 }
 impl State {
-    fn label(self) -> &'static str {
+    pub const ALL: [Self; 6] = [
+        Self::Unknown,
+        Self::Idle,
+        Self::Working,
+        Self::Waiting,
+        Self::Ready,
+        Self::Failed,
+    ];
+    pub fn label(self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
             Self::Idle => "idle",
@@ -67,6 +79,21 @@ impl State {
             Self::Ready => "ready",
             Self::Failed => "failed",
         }
+    }
+    pub fn labels() -> Vec<&'static str> {
+        Self::ALL.iter().map(|s| s.label()).collect()
+    }
+    pub fn parse(text: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|s| s.label() == text)
+            .ok_or_else(|| {
+                format!(
+                    "unknown state: {text}; use one of {}",
+                    Self::labels().join(", ")
+                )
+                .into()
+            })
     }
 }
 
@@ -221,12 +248,33 @@ enum Commands {
     },
     /// Inspect or change work streams.
     Stream {
-        /// list, pin, unpin, archive, unarchive, rename, review, snooze, resolve
+        /// list, show, pin, unpin, archive, unarchive, rename, review, snooze, resolve
         action: String,
         id: Option<String>,
         #[arg(long)]
         name: Option<String>,
     },
+    /// A token-budgeted situation report for an agent, from the same store.
+    Brief {
+        /// ranked replays the last ranking; active leads with heat; debt ignores recency.
+        #[arg(long, default_value = "ranked")]
+        mode: String,
+        #[arg(long)]
+        all: bool,
+        /// Rough ceiling on the reply, in estimated tokens.
+        #[arg(long, default_value_t = agent::DEFAULT_BUDGET_TOKENS as u32,
+              value_parser = clap::value_parser!(u32).range(200..=20000))]
+        budget: u32,
+        #[arg(long)]
+        session_id: Option<String>,
+    },
+    /// Which context and work stream this process is in, and how we know.
+    Whoami {
+        #[arg(long)]
+        session_id: Option<String>,
+    },
+    /// Speak the Model Context Protocol on stdin and stdout.
+    Mcp,
     /// Check local storage and integration setup.
     Doctor,
 }
@@ -241,23 +289,14 @@ fn cwd() -> String {
 }
 
 fn session(explicit: Option<String>) -> Result<String> {
-    if let Some(id) = explicit {
-        if !id.trim().is_empty() {
-            return Ok(id);
-        }
+    if explicit.as_deref().is_some_and(|id| id.trim().is_empty()) {
         return Err("session ID must not be empty".into());
     }
-    if let Ok(id) = env::var("STEWSH_SESSION_ID") {
-        if !id.trim().is_empty() {
-            return Ok(id);
-        }
-    }
-    if let Ok(id) = env::var("ITERM_SESSION_ID") {
-        if let Some((_, uuid)) = id.rsplit_once(':') {
-            return Ok(format!("iterm:{uuid}"));
-        }
-    }
-    Err("no session identity; source shell/stewsh.zsh or pass --session-id ID".into())
+    agent::declared(explicit.as_deref())
+        .map(|(id, _)| id)
+        .ok_or_else(|| {
+            "no session identity; source shell/stewsh.zsh or pass --session-id ID".into()
+        })
 }
 
 /// Exact match only. An agent reporting a fresh ID must never silently attach
@@ -319,6 +358,21 @@ fn execute(conn: &mut Connection, git: &mut Git, command: Commands, t: i64) -> R
             }
             rank::run(conn, &streams, t, intent.as_deref(), force)
         }
+        Commands::Brief {
+            mode,
+            all,
+            budget,
+            session_id,
+        } => {
+            let budget = agent::Budget {
+                mode: mode_of(&mode)?,
+                all,
+                tokens: budget as usize,
+            };
+            agent::brief(conn, git, session_id.as_deref(), &budget, t)
+        }
+        Commands::Whoami { session_id } => agent::whoami(conn, git, session_id.as_deref(), t),
+        Commands::Mcp => Err("mcp speaks on stdin and stdout; run it as its own process".into()),
         Commands::Group { context, to } => {
             let streams = stream::assemble(conn, git, t, Mode::Ranked, true)?;
             actions::group(conn, &streams, &context, &to, t)
@@ -329,6 +383,9 @@ fn execute(conn: &mut Connection, git: &mut Git, command: Commands, t: i64) -> R
                 return Ok(json!({"streams": streams, "as_of": t, "mode": "ranked"}));
             }
             let id = id.ok_or("stream action needs a stream")?;
+            if action == "show" {
+                return agent::detail(conn, git, &id, t);
+            }
             actions::stream_action(conn, &streams, &id, &action, name.as_deref(), t)
         }
         Commands::Track {
@@ -410,58 +467,32 @@ fn execute(conn: &mut Connection, git: &mut Git, command: Commands, t: i64) -> R
             session_id,
             clear,
         } => {
-            let id = existing_or_new(conn, session(session_id)?, t)?;
-            let tx = conn.transaction()?;
-            store::ensure(&tx, &id, &cwd(), t)?;
-            tx.commit()?;
-            if clear {
-                actions::context_action(conn, &id, "clear", None, None, t)
-            } else {
-                let note = note.as_deref().ok_or("provide a note or --clear")?;
-                actions::context_action(conn, &id, "capture", Some(note), None, t)
+            if note.is_none() && !clear {
+                return Err("provide a note or --clear".into());
             }
+            let id = existing_or_new(conn, session(session_id)?, t)?;
+            actions::capture(conn, &id, note.as_deref(), &cwd(), t)
         }
         Commands::Report {
             state,
             session_id,
-            agent,
+            agent: harness_name,
             summary,
             event_id,
         } => {
-            for (value, label) in [
-                (&agent, "agent"),
-                (&summary, "summary"),
-                (&event_id, "event ID"),
-            ] {
-                if let Some(v) = value {
-                    validate_text(v, label)?;
-                }
-            }
             let id = existing_or_new(conn, session(session_id)?, t)?;
-            let tx = conn.transaction()?;
-            store::ensure(&tx, &id, &cwd(), t)?;
-            if let Some(key) = &event_id {
-                if tx.execute(
-                    "INSERT OR IGNORE INTO receipts(session_id,external_id) VALUES(?1,?2)",
-                    params![id, key],
-                )? == 0
-                {
-                    return Ok(
-                        json!({"id":id,"duplicate":true,"message":"Report already recorded"}),
-                    );
-                }
-            }
-            tx.execute("UPDATE sessions SET state=?2,state_source='agent',agent=COALESCE(?3,agent),handoff=COALESCE(?4,handoff),revision=revision+1,last_active_interaction=?5 WHERE id=?1",params![id,state.label(),agent,summary,t])?;
-            store::event(
-                &tx,
+            actions::report(
+                conn,
                 &id,
+                &actions::Report {
+                    state,
+                    agent: harness_name.as_deref(),
+                    summary: summary.as_deref(),
+                    event_id: event_id.as_deref(),
+                },
+                &cwd(),
                 t,
-                "reported",
-                json!({"state":state.label(),"agent":agent,"summary":summary}),
-                event_id.as_deref(),
-            )?;
-            tx.commit()?;
-            Ok(json!({"id":id,"message":"Agent report recorded"}))
+            )
         }
         Commands::Focus { id, .. } | Commands::Preview { id } => {
             Err(format!("unexpected action dispatch for {id}").into())
@@ -607,6 +638,125 @@ fn show_streams(out: &mut impl Write, streams: &[Value], mode: &str) -> Result<(
         out,
         "focus --mode {mode} <n> jumps to a row above · rank re-orders on demand"
     )?;
+    Ok(())
+}
+
+/// The brief as a person reads it. Printed so you can see what an agent sees
+/// without piping it through a JSON viewer.
+fn show_brief(out: &mut impl Write, value: &Value, queue: &[Value]) -> Result<()> {
+    let counts = &value["counts"];
+    writeln!(
+        out,
+        "Brief ({}) · {} streams, {} asking for you, {} agents waiting · ~{} tokens of {}\n",
+        value["mode"].as_str().unwrap_or(""),
+        counts["streams"],
+        counts["needs_human"],
+        counts["agents_waiting"],
+        value["estimated_tokens"],
+        value["budget_tokens"]
+    )?;
+    if let Some(hint) = value["you"]["hint"].as_str() {
+        writeln!(out, "You: {}\n", clean(hint, 200))?;
+    } else if let Some(stream) = value["you"]["stream"].as_str() {
+        writeln!(
+            out,
+            "You: {} in {} (via {})\n",
+            clean(
+                value["you"]["context"]["id"]
+                    .as_str()
+                    .or(value["you"]["declared"].as_str())
+                    .unwrap_or("no context"),
+                60
+            ),
+            clean(stream, 60),
+            value["you"]["via"].as_str().unwrap_or("")
+        )?;
+    }
+    for s in queue {
+        let requests = s["requests"]
+            .as_array()
+            .map(|r| {
+                r.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        writeln!(
+            out,
+            "{:>3}. {} {:<48} {:>4}  {}",
+            s["n"],
+            if s["needs_human"] == true { "!" } else { " " },
+            clean(s["stream"].as_str().unwrap_or(""), 48),
+            s["score"],
+            requests
+        )?;
+        if let Some(next) = s["next"].as_str().filter(|n| !n.is_empty()) {
+            writeln!(out, "     → {}", clean(next, 150))?;
+        }
+    }
+    let omitted = &value["omitted"];
+    if omitted["streams"].as_u64().unwrap_or(0) > 0 || omitted["members"].as_u64().unwrap_or(0) > 0
+    {
+        writeln!(
+            out,
+            "\nOmitted to fit the budget: {} streams, {} members.",
+            omitted["streams"], omitted["members"]
+        )?;
+    }
+    Ok(())
+}
+
+fn show_whoami(out: &mut impl Write, value: &Value) -> Result<()> {
+    let declared = value["declared"].as_str();
+    writeln!(
+        out,
+        "Context: {}{} (via {})",
+        clean(
+            value["context"]["id"]
+                .as_str()
+                .or(declared)
+                .unwrap_or("unresolved"),
+            100
+        ),
+        if declared.is_some() {
+            " (claimed; no row yet)"
+        } else {
+            ""
+        },
+        value["via"].as_str().unwrap_or("")
+    )?;
+    writeln!(
+        out,
+        "Stream:  {}",
+        clean(value["stream"]["stream"].as_str().unwrap_or("none"), 100)
+    )?;
+    writeln!(
+        out,
+        "Directory: {}",
+        clean(value["cwd"].as_str().unwrap_or(""), 120)
+    )?;
+    for (label, key) in [("Next action", "note"), ("Handoff", "handoff")] {
+        if let Some(text) = value["context"][key].as_str() {
+            writeln!(out, "{label}: {}", clean(text, 400))?;
+        }
+    }
+    if let Some(hint) = value["hint"].as_str() {
+        writeln!(out, "\n{}", clean(hint, 400))?;
+    }
+    let siblings = value["siblings"].as_array().map_or(0, Vec::len);
+    if siblings > 0 {
+        writeln!(out, "\n{siblings} others in this stream:")?;
+        for m in value["siblings"].as_array().into_iter().flatten() {
+            writeln!(
+                out,
+                "  · {:<46} {:<8} idle {}s",
+                clean(m["id"].as_str().unwrap_or(""), 46),
+                clean(m["state"].as_str().unwrap_or(""), 8),
+                m["idle_seconds"]
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -782,6 +932,10 @@ fn display(value: &Value, machine: bool) -> Result<()> {
                 )?;
             }
         }
+    } else if let Some(queue) = value.get("queue").and_then(Value::as_array) {
+        show_brief(&mut out, value, queue)?;
+    } else if value.get("via").is_some() {
+        show_whoami(&mut out, value)?;
     } else if let Some(text) = value.get("text").and_then(Value::as_str) {
         for line in text.lines() {
             writeln!(out, "{}", clean(line, 2000))?;
@@ -905,6 +1059,15 @@ fn run(cli: Cli) -> Result<()> {
                 return Err("serve is interactive; use queue --json for machine output".into());
             }
             serve::start(conn, port, cli.pr, !no_open)
+        }
+        Commands::Mcp => {
+            // Nothing may print alongside the protocol, so --json has no
+            // meaning here: every reply is already JSON-RPC.
+            let mut git = Git::new(cli.pr);
+            // One bounded regroup up front, so the first tool call answers
+            // about the real desk rather than an empty one.
+            let _ = stream::regroup(&mut conn, &mut git, now());
+            mcp::serve(conn, cli.pr)
         }
         command => display(&dispatch(&mut conn, &mut git, command, now())?, cli.json),
     }
