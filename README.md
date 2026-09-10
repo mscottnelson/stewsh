@@ -76,7 +76,7 @@ open on that worktree.
 | Saved next action | +50 |
 | Waiting / failed / ready | +45 / +35 / +25 |
 | Unreviewed work from before today | +30 |
-| Failing pull request checks | +40 |
+| Pull request checks failing / running | +40 / +5 |
 | Never reviewed / changed since review | +10 / +20 |
 | Uncommitted changes / unpushed commits | +10 / up to +20 |
 | Reviewed, unchanged | -60 |
@@ -271,22 +271,28 @@ on macOS and Linux. iTerm2 sync, focus, and preview require macOS with iTerm2
 running and Automation access granted.
 
 ```sh
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-cargo build --release --locked
-CARGO_TARGET_DIR=target/package-check cargo package --locked
+make            # list every target
+make ci         # fmt, clippy, tests and the packaging check, in CI's order
+make release    # optimized build
+make dev        # rebuild and restart the web view on every change
 ```
 
-Give `cargo package` its own target directory. Its verification build reuses the
-same fingerprint slot and rewrites the dependency list to point at the packaged
-copy under `target/package/`, so afterwards `cargo build` checks those files
-instead of yours. They never change, so it reports `Fresh` and keeps a stale
-binary however much you edit.
+`make dev` watches `src/` and `tests/` and restarts the web view whenever a
+source, asset or manifest file changes, against a throwaway database under
+`.dev/` so a half-written migration cannot reach your real queue. Point it at
+the real one with `make dev DB=~/.config/stewsh/stewsh.db`. `make watch` is the
+same loop running `cargo check` alone. Both need `fswatch`.
+
+`make ci` gives `cargo package` its own target directory, and a hand-typed
+`cargo package` does not. That is worth knowing, because its verification build
+reuses the same fingerprint slot and rewrites the dependency list to point at
+the packaged copy under `target/package/`, so afterwards `cargo build` checks
+those files instead of yours. They never change, so it reports `Fresh` and keeps
+a stale binary however much you edit.
 
 The signature is a `Fresh` that **survives `touch`**, because cargo is not
-looking at the file you touched. `cargo clean -p stewsh` clears it; the line
-above prevents it.
+looking at the file you touched. `cargo clean -p stewsh` clears it; `make ci`
+prevents it.
 
 Tests cover migration, heat decay against undecayed debt, stream grouping with
 manual override, ranker failure and caching, the evidence document, transcript
