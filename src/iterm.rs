@@ -5,7 +5,6 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    io::Read,
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -36,20 +35,8 @@ pub fn script(source: &str, args: &[&str]) -> Result<String> {
         .spawn()?;
     let stdout = child.stdout.take().ok_or("missing stdout")?;
     let stderr = child.stderr.take().ok_or("missing stderr")?;
-    let out = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout
-            .take(16 * 1024 * 1024)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
-    });
-    let err = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr
-            .take(64 * 1024)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
-    });
+    let out = thread::spawn(move || crate::rank::drain(stdout, 16 * 1024 * 1024));
+    let err = thread::spawn(move || crate::rank::drain(stderr, 64 * 1024));
     let start = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {

@@ -1041,6 +1041,14 @@ fn repository_evidence_keeps_a_stream_visible_after_its_panes_are_resolved() {
          VALUES('r1#wip','one','pane','manual');",
     );
     a.run(&["resolve", "one"]);
+    // A browser tab attached to the stream must not mask the git evidence
+    // either: it makes the member list non-empty without being real work.
+    a.sql(
+        "INSERT INTO sessions(id,cwd,creation_time,last_active_interaction,kind,source,agent,name)
+         VALUES('tab:zz','',1,1,'tab','browser','Google Chrome','PR page');
+         INSERT INTO stream_members(stream_id,context_id,role,origin)
+         VALUES('r1#wip','tab:zz','tab','auto');",
+    );
     let debt = a.run(&["queue", "--mode", "debt", "--limit", "200"])["streams"]
         .as_array()
         .unwrap()

@@ -93,6 +93,25 @@ pub fn fingerprint(streams: &[Stream], intent: Option<&str>) -> String {
     )
 }
 
+/// Read a pipe to the end while keeping only the first `cap` bytes. Stopping
+/// at the cap instead would leave the pipe full and the child blocked on write
+/// until the timeout, turning an over-talkative ranker into a hang.
+pub fn drain(mut pipe: impl Read, cap: usize) -> std::io::Result<Vec<u8>> {
+    let mut kept = Vec::new();
+    let mut buf = [0u8; 32 * 1024];
+    loop {
+        match pipe.read(&mut buf) {
+            Ok(0) => return Ok(kept),
+            Ok(n) => {
+                let room = cap.saturating_sub(kept.len());
+                kept.extend_from_slice(&buf[..n.min(room)]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn invoke(command: &str, input: &str) -> Result<String> {
     let parts = shlex::split(command).ok_or("STEWSH_RANKER is not valid shell quoting")?;
     let (program, args) = parts.split_first().ok_or("STEWSH_RANKER is empty")?;
@@ -108,14 +127,8 @@ fn invoke(command: &str, input: &str) -> Result<String> {
     let writer = thread::spawn(move || stdin.write_all(payload.as_bytes()));
     let stdout = child.stdout.take().ok_or("missing ranker stdout")?;
     let stderr = child.stderr.take().ok_or("missing ranker stderr")?;
-    let out = thread::spawn(move || {
-        let mut b = Vec::new();
-        stdout.take(4 * 1024 * 1024).read_to_end(&mut b).map(|_| b)
-    });
-    let err = thread::spawn(move || {
-        let mut b = Vec::new();
-        stderr.take(64 * 1024).read_to_end(&mut b).map(|_| b)
-    });
+    let out = thread::spawn(move || drain(stdout, 4 * 1024 * 1024));
+    let err = thread::spawn(move || drain(stderr, 64 * 1024));
     let start = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {

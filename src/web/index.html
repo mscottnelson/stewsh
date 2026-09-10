@@ -90,7 +90,7 @@ kbd{border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;paddi
   <template x-for="(s,i) in streams" :key="s.id">
     <div class="stream" :class="i===cursor&&'sel'">
       <div class="row" @click="cursor=i; s.open=!s.open">
-        <div class="ord" x-text="s.ordinal ?? (i+1)"></div>
+        <div class="ord" x-text="i+1"></div>
         <div class="grow">
           <div class="name" x-text="s.name"></div>
           <div class="sub">
