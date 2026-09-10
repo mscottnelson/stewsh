@@ -623,3 +623,125 @@ fn complete_snapshots_preserve_user_state_and_failed_sync_keeps_availability() {
     assert_eq!(s["availability"], "closed");
     assert_eq!(s["resolved"], false);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_changed_screen_is_activity_but_not_a_new_revision() {
+    use std::os::unix::fs::PermissionsExt;
+    let a = App::new();
+    let mock = a.root.join("osascript");
+    fs::write(&mock, "#!/bin/sh\ncat \"$STEWSH_TEST_PANES\"\n").unwrap();
+    fs::set_permissions(&mock, fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = a.root.join("panes.json");
+    let pane = |text: &str| {
+        format!(
+            r#"[{{"id":"p1","name":"Build","tty":"/dev/no-test-tty","cwd":"/work","text":"{text}","prompt":false,"location":"Window 1"}}]"#
+        )
+    };
+    let sync = || {
+        a.command()
+            .args(["--json", "sync"])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    a.root.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("STEWSH_TEST_PANES", &fixture)
+            .output()
+            .unwrap()
+    };
+    fs::write(&fixture, pane("building |")).unwrap();
+    assert!(sync().status.success());
+    a.run(&["review", "iterm:p1"]);
+    let reviewed = a.show("iterm:p1");
+    assert_eq!(reviewed["revision"], reviewed["reviewed_revision"]);
+
+    // A spinner advancing changes the screen fingerprint. That is activity,
+    // and it must not silently cancel the review the user just made.
+    fs::write(&fixture, pane("building /")).unwrap();
+    assert!(sync().status.success());
+    let after = a.show("iterm:p1");
+    assert_eq!(
+        after["revision"], reviewed["revision"],
+        "spinner bumped revision"
+    );
+    assert_eq!(after["revision"], after["reviewed_revision"]);
+    assert!(
+        after["heat"].as_f64().unwrap() > 0.0,
+        "still counted as activity"
+    );
+
+    // A changed signal category is a real revision and does resurface it.
+    fs::write(&fixture, pane("error: build failed")).unwrap();
+    assert!(sync().status.success());
+    let changed = a.show("iterm:p1");
+    assert_eq!(changed["state"], "failed");
+    assert!(changed["revision"].as_i64().unwrap() > reviewed["revision"].as_i64().unwrap());
+    assert!(changed["revision"].as_i64().unwrap() > changed["reviewed_revision"].as_i64().unwrap());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn focusing_a_stream_selects_its_pane_and_counts_as_intent() {
+    use std::os::unix::fs::PermissionsExt;
+    let a = App::new();
+    let mock = a.root.join("osascript");
+    // Records the arguments it was asked to act on, then answers like iTerm.
+    fs::write(
+        &mock,
+        "#!/bin/sh\nif [ -n \"$STEWSH_TEST_PANES\" ] && [ $# -le 4 ]; then cat \"$STEWSH_TEST_PANES\"; \
+         else echo \"$5 $6\" >> \"$STEWSH_TEST_FOCUS\"; printf '{\"focused\":true}'; fi\n",
+    )
+    .unwrap();
+    fs::set_permissions(&mock, fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = a.root.join("panes.json");
+    fs::write(&fixture, r#"[{"id":"p1","name":"Build","tty":"/dev/no-test-tty","cwd":"/work","text":"ok","prompt":true,"location":"Window 2 / Tab 1"}]"#).unwrap();
+    let focus_log = a.root.join("focus.log");
+    let path = format!(
+        "{}:{}",
+        a.root.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    assert!(a
+        .command()
+        .args(["--json", "sync"])
+        .env("PATH", &path)
+        .env("STEWSH_TEST_PANES", &fixture)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    a.run(&["group", "iterm:p1", "--to", "Build work"]);
+    // An agent session in the same stream must not be chosen over the pane.
+    a.run(&[
+        "report",
+        "ready",
+        "--session-id",
+        "agent-only",
+        "--agent",
+        "claude",
+    ]);
+    a.run(&["group", "agent-only", "--to", "Build work"]);
+
+    let out = a
+        .command()
+        .args(["--json", "focus", "Build work"])
+        .env("PATH", &path)
+        .env("STEWSH_TEST_FOCUS", &focus_log)
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], true, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(v["data"]["focused"], "iterm:p1");
+    assert_eq!(v["data"]["location"], "Window 2 / Tab 1");
+    assert!(fs::read_to_string(&focus_log).unwrap().contains("p1 focus"));
+    // Choosing to go somewhere is the clearest statement of intent there is.
+    let events = a.run(&["show", "iterm:p1"])["events"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(events.iter().any(|e| e["kind"] == "focused"));
+}
