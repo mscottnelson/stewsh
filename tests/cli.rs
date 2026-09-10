@@ -794,14 +794,16 @@ fn a_large_transcript_survives_a_split_character_at_the_tail_offset() {
     );
     // Place the 256 KiB tail offset inside a run of two-byte characters, on a
     // continuation byte. That is what made a strict UTF-8 read fail, empty the
-    // buffer, and silently drop a live session. One ASCII byte flips parity, so
-    // this needs at most two attempts rather than a search.
+    // buffer, and silently drop a live session. The padding follows the run
+    // rather than leading it: the offset is measured from the end, so only a
+    // byte between the run and EOF moves which half of a character it lands
+    // on. One such byte flips parity, so two attempts suffice.
     let path = project.join("big-1.jsonl");
     let build = |shim: usize| {
         format!(
             "{{\"type\":\"user\",\"cwd\":\"{cwd}\",\"gitBranch\":\"main\",\"message\":{{\"content\":\"{}{}\"}}}}\n{trailer}",
-            "x".repeat(shim),
-            "\u{e9}".repeat(160_000)
+            "\u{e9}".repeat(160_000),
+            "x".repeat(shim)
         )
     };
     let body = (0..2)
